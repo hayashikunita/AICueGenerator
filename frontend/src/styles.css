@@ -1,0 +1,251 @@
+:root {
+  --bg: #12141a;
+  --panel: #1b1e27;
+  --panel2: #232734;
+  --border: #2e3342;
+  --text: #e6e8ee;
+  --muted: #9aa2b1;
+  --accent: #5b8cff;
+  --high: #35c67a;
+  --review: #e6b23a;
+  --reject: #e2604a;
+  --danger: #e2604a;
+  font-family: system-ui, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+
+h2 {
+  font-size: 15px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sub {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 20px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 13px;
+}
+
+button {
+  background: var(--accent);
+  border: none;
+  color: white;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+button.danger {
+  background: var(--danger);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge.high {
+  background: rgba(53, 198, 122, 0.18);
+  color: var(--high);
+}
+.badge.review {
+  background: rgba(230, 178, 58, 0.18);
+  color: var(--review);
+}
+.badge.reject {
+  background: rgba(226, 96, 74, 0.18);
+  color: var(--reject);
+}
+
+.job {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  background: var(--panel2);
+}
+
+.job.active {
+  border-color: var(--accent);
+}
+
+.job .mono {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.status.COMPLETED {
+  color: var(--high);
+  border-color: var(--high);
+}
+.status.FAILED {
+  color: var(--reject);
+  border-color: var(--reject);
+}
+.status.RUNNING {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.banner {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 13px;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.dot.ok {
+  background: var(--high);
+}
+.dot.warn {
+  background: var(--review);
+}
+.dot.bad {
+  background: var(--reject);
+}
+
+.error {
+  color: var(--reject);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.mono {
+  font-family: ui-monospace, monospace;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.log {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+a {
+  color: var(--accent);
+}
