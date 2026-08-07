@@ -30,7 +30,7 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
     setRbSearching(true);
     setRbSearched(false);
     try {
-      const res = await api.searchRekordbox(rbQuery.trim(), 20);
+      const res = await api.searchRekordbox(rbQuery.trim(), 50);
       if (!res.available) {
         toast.push("error", `rekordbox に接続できません: ${res.reason ?? "不明"}`);
         setRbResults([]);
@@ -95,7 +95,7 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
         <input
           style={{ flex: 1 }}
           value={rbQuery}
-          placeholder="曲名 / アーティストで検索"
+          placeholder="曲名 / アーティスト / アルバム / ファイル名"
           onChange={(e) => setRbQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && searchRekordbox()}
         />

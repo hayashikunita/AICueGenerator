@@ -51,18 +51,32 @@ def get_content_detail(db: Any, content_id: str) -> dict[str, Any] | None:
     return content_to_dict(content)
 
 
-def search_contents(db: Any, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
-    """タイトル/アーティストの部分一致で曲を検索する（大文字小文字無視）。"""
+def _content_album(content: Any) -> str | None:
+    album = getattr(content, "Album", None)
+    if album is not None:
+        name = getattr(album, "Name", None)
+        if name:
+            return str(name)
+    name = getattr(content, "AlbumName", None)
+    return str(name) if name else None
+
+
+def search_contents(db: Any, query: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    """曲を検索する。タイトル/アーティスト/アルバム/ファイルパスを対象に、
+    空白区切りの全語が含まれる曲を返す（大文字小文字は無視）。"""
     out: list[dict[str, Any]] = []
     try:
         rows = db.get_content()
     except Exception:  # noqa: BLE001
         return out
-    needle = (query or "").strip().lower()
+    tokens = [t for t in (query or "").strip().lower().split() if t]
     for content in rows:
         title = str(getattr(content, "Title", "") or "")
         artist = _content_artist(content) or ""
-        if needle and needle not in f"{title} {artist}".lower():
+        album = _content_album(content) or ""
+        path = str(getattr(content, "FolderPath", "") or "")
+        haystack = f"{title} {artist} {album} {path}".lower()
+        if tokens and not all(tok in haystack for tok in tokens):
             continue
         out.append(content_to_dict(content))
         if len(out) >= limit:
