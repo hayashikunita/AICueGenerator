@@ -39,8 +39,23 @@ export function JobList({
             <div className={`progress ${running && pct === 0 ? "indeterminate" : ""}`}>
               <span style={{ width: `${pct}%` }} />
             </div>
-            <div className="mono" style={{ marginTop: 8, fontSize: 11 }}>
-              {j.id.slice(0, 14)}…
+            <div
+              className="row"
+              style={{ justifyContent: "space-between", alignItems: "center", marginTop: 8 }}
+            >
+              <span className="mono" style={{ fontSize: 11 }}>
+                {j.id.slice(0, 14)}…
+              </span>
+              <button
+                type="button"
+                className="secondary tiny"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelect(j.id);
+                }}
+              >
+                開く
+              </button>
             </div>
           </div>
         );
