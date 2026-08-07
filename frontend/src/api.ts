@@ -3,8 +3,11 @@ import type {
   Diagnostics,
   DecisionRequest,
   ExecuteResult,
+  ExportXmlResult,
   JobParams,
   JobSummary,
+  JobTrack,
+  RekordboxSearchResult,
   TrackInput,
   WritePlan,
 } from "./types";
@@ -60,6 +63,17 @@ export const api = {
   candidates: (jobId: string) =>
     req<{ candidates: Candidate[] }>(`/jobs/${jobId}/candidates`),
 
+  jobTracks: (jobId: string) =>
+    req<{ tracks: JobTrack[] }>(`/jobs/${jobId}/tracks`),
+
+  audioUrl: (trackId: string) =>
+    `${BASE}/tracks/${trackId}/audio?token=${encodeURIComponent(token)}`,
+
+  searchRekordbox: (query: string, limit = 20) =>
+    req<RekordboxSearchResult>(
+      `/rekordbox/tracks?query=${encodeURIComponent(query)}&limit=${limit}`,
+    ),
+
   decide: (candidateId: string, body: DecisionRequest) =>
     req<{ decision_id: string; candidate_id: string }>(
       `/candidates/${candidateId}/decision`,
@@ -76,6 +90,12 @@ export const api = {
     req<ExecuteResult>("/write/execute", {
       method: "POST",
       body: JSON.stringify({ plan_id: planId, confirmation_hash: confirmationHash }),
+    }),
+
+  exportXml: (jobId: string) =>
+    req<ExportXmlResult>("/write/export-xml", {
+      method: "POST",
+      body: JSON.stringify({ job_id: jobId }),
     }),
 
   reportCsvUrl: (jobId: string) => `${BASE}/jobs/${jobId}/export.csv`,

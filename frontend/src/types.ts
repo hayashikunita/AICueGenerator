@@ -27,6 +27,21 @@ export interface TrackInput {
   writable?: boolean;
 }
 
+export interface RekordboxTrack {
+  content_id: string;
+  title: string | null;
+  artist: string | null;
+  path: string | null;
+  bpm: number | null;
+  length_sec: number | null;
+}
+
+export interface RekordboxSearchResult {
+  available: boolean;
+  reason: string | null;
+  tracks: RekordboxTrack[];
+}
+
 export interface JobSummary {
   id: string;
   status: string;
@@ -35,6 +50,15 @@ export interface JobSummary {
   failed: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface JobTrack {
+  id: string;
+  content_id: string;
+  path: string;
+  format: string;
+  duration_ms: number | null;
+  status: string;
 }
 
 export interface Evidence {
@@ -89,6 +113,15 @@ export interface ExecuteResult {
   message: string;
   written: number;
   details: Record<string, unknown>;
+}
+
+export interface ExportXmlResult {
+  folder: string;
+  xml_path: string;
+  tracks: number;
+  cues: number;
+  copied: number;
+  skipped: string[];
 }
 
 export interface ProgressEvent {

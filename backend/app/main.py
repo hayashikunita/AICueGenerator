@@ -9,10 +9,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .api.routes_audio import router as audio_router
 from .api.routes_candidates import router as candidates_router
 from .api.routes_diagnostics import router as diagnostics_router
 from .api.routes_health import router as health_router
 from .api.routes_jobs import router as jobs_router
+from .api.routes_rekordbox import router as rekordbox_router
 from .api.routes_write import router as write_router
 from .api.routes_ws import router as ws_router
 from .config import get_settings
@@ -55,6 +57,8 @@ def create_app() -> FastAPI:
     app.include_router(diagnostics_router)
     app.include_router(jobs_router)
     app.include_router(candidates_router)
+    app.include_router(audio_router)
+    app.include_router(rekordbox_router)
     app.include_router(write_router)
     app.include_router(ws_router)
 

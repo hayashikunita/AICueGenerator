@@ -30,6 +30,21 @@ class CreateJobResponse(BaseModel):
     job_id: str
 
 
+class RekordboxTrack(BaseModel):
+    content_id: str
+    title: str | None = None
+    artist: str | None = None
+    path: str | None = None
+    bpm: float | None = None
+    length_sec: int | None = None
+
+
+class RekordboxSearchResponse(BaseModel):
+    available: bool
+    reason: str | None = None
+    tracks: list[RekordboxTrack] = []
+
+
 class JobSummary(BaseModel):
     id: str
     status: str
@@ -42,6 +57,19 @@ class JobSummary(BaseModel):
 
 class JobListResponse(BaseModel):
     jobs: list[JobSummary]
+
+
+class JobTrackOut(BaseModel):
+    id: str
+    content_id: str
+    path: str
+    format: str
+    duration_ms: int | None = None
+    status: str
+
+
+class JobTrackListResponse(BaseModel):
+    tracks: list[JobTrackOut]
 
 
 class EvidenceOut(BaseModel):
@@ -114,3 +142,16 @@ class ExecutePlanResponse(BaseModel):
     message: str = ""
     written: int = 0
     details: dict[str, Any] = {}
+
+
+class ExportXmlRequest(BaseModel):
+    job_id: str
+
+
+class ExportXmlResponse(BaseModel):
+    folder: str
+    xml_path: str
+    tracks: int
+    cues: int
+    copied: int
+    skipped: list[str] = []

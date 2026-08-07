@@ -95,17 +95,42 @@ def _process_track(
     hub.publish(job_id, EventType.TRACK_STARTED, {"track_id": track_id})
     path = str(track["path"])
     bpm = params.get("bpm")
+    bars_per_phrase = int(params.get("bars_per_phrase") or 16)
+    top_k = int(params.get("top_k") or 3)
 
     if not Path(path).exists():
         _fail_track(repo, hub, job_id, track_id, ErrorCode.AUDIO_NOT_FOUND)
         return
 
     try:
-        result = analyze_file(path, bpm=bpm)
+        result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, top_k=top_k)
     except Exception as exc:  # noqa: BLE001 - 曲単位失敗は継続
         repo.add_audit(actor="worker", action="analyze", result="error",
                        job_id=job_id, track_id=track_id, after={"error": str(exc)})
         _fail_track(repo, hub, job_id, track_id, ErrorCode.DECODE_FAILED)
+        return
+
+    cached = repo.find_cached_run(
+        track_id=track_id,
+        engine_version=ENGINE_VERSION,
+        fingerprint=result.fingerprint,
+        params=params,
+    )
+    if cached is not None:
+        run_id = str(cached["id"])
+        repo.set_job_track_status(job_id, track_id, "COMPLETED")
+        repo.bump_job_counts(job_id, completed=1)
+        hub.publish(
+            job_id,
+            EventType.TRACK_COMPLETED,
+            {
+                "track_id": track_id,
+                "run_id": run_id,
+                "candidates": len(repo.list_candidates_for_run(run_id)),
+                "cached": True,
+            },
+        )
+        _emit_progress(repo, hub, job_id)
         return
 
     run_id = repo.create_run(

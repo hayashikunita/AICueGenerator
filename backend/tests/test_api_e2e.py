@@ -82,6 +82,167 @@ def test_full_flow_analyze_decide_plan_execute(tmp_path):
         assert body["error_code"] == "WRITE_DISABLED"
 
 
+def test_export_xml_creates_dated_library(tmp_path):
+    import os
+    import xml.etree.ElementTree as ET
+
+    from app.config import get_settings
+
+    track = synthesize_edm(bpm=128.0, seed=0)
+    wav = write_wav(tmp_path / "export_song.wav", track.y, track.sr)
+    with TestClient(app) as client:
+        job_id = client.post(
+            "/api/v1/jobs",
+            headers=_auth(),
+            json={
+                "params": {"bpm": 128.0},
+                "tracks": [{"content_id": "EXP1", "path": str(wav), "format": "WAV"}],
+            },
+        ).json()["job_id"]
+        _wait_job(client, job_id)
+        cands = client.get(f"/api/v1/jobs/{job_id}/candidates", headers=_auth()).json()[
+            "candidates"
+        ]
+        drops = [c for c in cands if c["type"] == "DROP"]
+        assert drops
+        client.post(
+            f"/api/v1/candidates/{drops[0]['id']}/decision",
+            headers=_auth(),
+            json={"accepted": True, "cue_kind": "HOT", "slot": "A"},
+        )
+
+        resp = client.post("/api/v1/write/export-xml", headers=_auth(), json={"job_id": job_id})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["tracks"] == 1
+        assert body["cues"] == 1
+        assert body["copied"] == 1
+
+        folder = body["folder"]
+        # ライブラリは export_dir/yyyymmdd 配下に作られる。
+        assert folder.startswith(str(get_settings().export_dir))
+        assert os.path.basename(folder).isdigit() and len(os.path.basename(folder)) == 8
+        # 音源が複製されている。
+        assert os.path.isfile(os.path.join(folder, "export_song.wav"))
+        # rekordbox.xml に POSITION_MARK が含まれる。
+        tree = ET.parse(body["xml_path"])
+        marks = tree.getroot().findall(".//POSITION_MARK")
+        assert len(marks) == 1
+        assert marks[0].get("Num") == "0"  # HOT slot A -> 0
+
+
+def test_export_xml_rejects_without_accepted_cues(tmp_path):
+    track = synthesize_edm(bpm=128.0, seed=0)
+    wav = write_wav(tmp_path / "empty_song.wav", track.y, track.sr)
+    with TestClient(app) as client:
+        job_id = client.post(
+            "/api/v1/jobs",
+            headers=_auth(),
+            json={
+                "params": {"bpm": 128.0},
+                "tracks": [{"content_id": "EXP2", "path": str(wav), "format": "WAV"}],
+            },
+        ).json()["job_id"]
+        _wait_job(client, job_id)
+        resp = client.post("/api/v1/write/export-xml", headers=_auth(), json={"job_id": job_id})
+        assert resp.status_code == 400
+
+
+def test_top_k_is_honored(tmp_path):
+    track = synthesize_edm(bpm=128.0, seed=0)
+    wav = write_wav(tmp_path / "topk.wav", track.y, track.sr)
+    with TestClient(app) as client:
+        job_id = client.post(
+            "/api/v1/jobs",
+            headers=_auth(),
+            json={
+                "params": {"bpm": 128.0, "top_k": 1},
+                "tracks": [{"content_id": "TOPK1", "path": str(wav), "format": "WAV"}],
+            },
+        ).json()["job_id"]
+        _wait_job(client, job_id)
+        cands = client.get(f"/api/v1/jobs/{job_id}/candidates", headers=_auth()).json()[
+            "candidates"
+        ]
+        per_type: dict[str, int] = {}
+        for c in cands:
+            per_type[c["type"]] = per_type.get(c["type"], 0) + 1
+        # top_k=1 なら種別ごとに最大1件。反映されていなければ既定3で超過する。
+        assert per_type and all(n <= 1 for n in per_type.values())
+
+
+def test_rekordbox_search_is_failsafe():
+    with TestClient(app) as client:
+        resp = client.get("/api/v1/rekordbox/tracks?query=test", headers=_auth())
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "available" in body
+        assert "tracks" in body
+
+
+def test_reanalyze_same_track_reuses_cache(tmp_path):
+    track = synthesize_edm(bpm=128.0, seed=0)
+    wav = write_wav(tmp_path / "cache.wav", track.y, track.sr)
+    payload = {
+        "params": {"bpm": 128.0},
+        "tracks": [{"content_id": "CACHE1", "path": str(wav), "format": "WAV"}],
+    }
+    with TestClient(app) as client:
+        first = client.post("/api/v1/jobs", headers=_auth(), json=payload).json()["job_id"]
+        job1 = _wait_job(client, first)
+        assert job1["status"] == "COMPLETED"
+        cands1 = client.get(f"/api/v1/jobs/{first}/candidates", headers=_auth()).json()["candidates"]
+
+        # 同一 content_id・同一音源・同一パラメータでの再解析はキャッシュ再利用され失敗しない
+        second = client.post("/api/v1/jobs", headers=_auth(), json=payload).json()["job_id"]
+        job2 = _wait_job(client, second)
+        assert job2["status"] == "COMPLETED"
+        assert job2["completed"] == 1 and job2["failed"] == 0
+        cands2 = client.get(f"/api/v1/jobs/{second}/candidates", headers=_auth()).json()["candidates"]
+        assert len(cands2) == len(cands1)
+
+
+def test_audio_streaming_serves_registered_track(tmp_path):
+    track = synthesize_edm(bpm=128.0, seed=0)
+    wav = write_wav(tmp_path / "audio.wav", track.y, track.sr)
+    payload = {
+        "params": {"bpm": 128.0},
+        "tracks": [{"content_id": "AUDIO1", "path": str(wav), "format": "WAV"}],
+    }
+    with TestClient(app) as client:
+        job_id = client.post("/api/v1/jobs", headers=_auth(), json=payload).json()["job_id"]
+        _wait_job(client, job_id)
+
+        # トラック一覧にパスと track_id が含まれる
+        tracks = client.get(f"/api/v1/jobs/{job_id}/tracks", headers=_auth()).json()["tracks"]
+        assert len(tracks) == 1
+        track_id = tracks[0]["id"]
+        assert tracks[0]["path"] == str(wav)
+
+        url = f"/api/v1/tracks/{track_id}/audio"
+        # クエリトークンで全体取得できる
+        full = client.get(f"{url}?token={app.state.token}")
+        assert full.status_code == 200
+        assert full.headers["accept-ranges"] == "bytes"
+
+        # Range 指定は 206 と Content-Range を返す
+        ranged = client.get(
+            f"{url}?token={app.state.token}", headers={"Range": "bytes=0-99"}
+        )
+        assert ranged.status_code == 206
+        assert ranged.headers["content-range"].startswith("bytes 0-99/")
+        assert len(ranged.content) == 100
+
+        # トークン無し/誤りは 401
+        assert client.get(url).status_code == 401
+        assert client.get(f"{url}?token=WRONG").status_code == 401
+
+        # 未登録 track_id は 404
+        assert client.get(
+            f"/api/v1/tracks/does-not-exist/audio?token={app.state.token}"
+        ).status_code == 404
+
+
 def test_job_missing_audio_marks_failed(tmp_path):
     with TestClient(app) as client:
         resp = client.post(

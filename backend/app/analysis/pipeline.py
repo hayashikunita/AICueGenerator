@@ -77,14 +77,23 @@ def analyze_waveform(
     )
 
 
-def analyze_file(path: str, *, bpm: float | None = None) -> AnalysisResult:
+def analyze_file(
+    path: str, *, bpm: float | None = None, bars_per_phrase: int = 16, top_k: int = 3
+) -> AnalysisResult:
     """音源ファイルをデコードして解析する（soundfile/librosa 必須）。"""
     from .decode import decode_mono
     from .fingerprint import audio_fingerprint
 
     decoded = decode_mono(path)
     fp = audio_fingerprint(path)
-    result = analyze_waveform(decoded.y, decoded.sr, bpm=bpm, fingerprint=fp)
+    result = analyze_waveform(
+        decoded.y,
+        decoded.sr,
+        bpm=bpm,
+        bars_per_phrase=bars_per_phrase,
+        top_k=top_k,
+        fingerprint=fp,
+    )
     if decoded.is_silent:
         result = AnalysisResult(
             fingerprint=result.fingerprint,

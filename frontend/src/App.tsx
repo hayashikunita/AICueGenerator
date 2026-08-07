@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, token } from "./api";
+import { CueColorSettings } from "./components/CueColorSettings";
 import { Diagnostics } from "./components/Diagnostics";
 import { JobDetail } from "./components/JobDetail";
 import { JobList } from "./components/JobList";
@@ -29,7 +30,13 @@ export function App() {
   if (!token) {
     return (
       <div className="app">
-        <h1>rekordbox AI Cue Generator</h1>
+        <header className="app-header">
+          <div className="logo">🎛️</div>
+          <div>
+            <h1>rekordbox AI Cue Generator</h1>
+            <p className="sub">EDM 楽曲を解析し、Drop / Break / Build などのキュー候補を提案します。</p>
+          </div>
+        </header>
         <div className="panel error">
           トークンがありません。起動時に表示された URL（?token=…付き）でアクセスしてください。
         </div>
@@ -39,8 +46,13 @@ export function App() {
 
   return (
     <div className="app">
-      <h1>rekordbox AI Cue Generator</h1>
-      <p className="sub">EDM 楽曲を解析し、Drop / Break / Build などのキュー候補を提案します。</p>
+      <header className="app-header">
+        <div className="logo">🎛️</div>
+        <div>
+          <h1>rekordbox AI Cue Generator</h1>
+          <p className="sub">EDM 楽曲を解析し、Drop / Break / Build などのキュー候補を提案します。</p>
+        </div>
+      </header>
 
       <Diagnostics />
 
@@ -52,13 +64,19 @@ export function App() {
               setActiveId(id);
             }}
           />
+          <CueColorSettings />
           <JobList jobs={jobs} activeId={activeId} onSelect={setActiveId} />
         </div>
         <div>
           {activeId ? (
             <JobDetail jobId={activeId} writable={writable} onJobUpdated={refreshJobs} />
           ) : (
-            <div className="panel muted">左のジョブを選択するか、新規解析を開始してください。</div>
+            <div className="panel">
+              <div className="empty">
+                <span className="emoji">🎚️</span>
+                左のジョブを選択するか、新規解析を開始してください。
+              </div>
+            </div>
           )}
         </div>
       </div>

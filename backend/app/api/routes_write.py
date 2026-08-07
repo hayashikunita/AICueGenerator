@@ -13,10 +13,13 @@ from ..rekordbox.writer import (
     execute_write_plan,
 )
 from ..domain.enums import WriteAction
+from ..rekordbox.xml_export import export_rekordbox_xml
 from ..schemas.jobs import (
     BuildPlanRequest,
     ExecutePlanRequest,
     ExecutePlanResponse,
+    ExportXmlRequest,
+    ExportXmlResponse,
     PlanItemOut,
     WritePlanResponse,
 )
@@ -121,6 +124,24 @@ def execute_plan(req: ExecutePlanRequest, repo: Repository = Depends(get_repo)) 
         written=result.written,
         details=result.details,
     )
+
+
+@router.post("/write/export-xml", response_model=ExportXmlResponse)
+def export_xml(req: ExportXmlRequest, repo: Repository = Depends(get_repo)) -> ExportXmlResponse:
+    if repo.get_job(req.job_id) is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    result = export_rekordbox_xml(repo, req.job_id, export_root=get_settings().export_dir)
+    if result["tracks"] == 0:
+        raise HTTPException(status_code=400, detail="採用キューがありません（書き出し対象なし）")
+    repo.add_audit(
+        actor="user",
+        action="export_xml",
+        result="ok",
+        target=result["folder"],
+        job_id=req.job_id,
+        after={"tracks": result["tracks"], "cues": result["cues"], "copied": result["copied"]},
+    )
+    return ExportXmlResponse(**result)
 
 
 def _time_of(row) -> int:

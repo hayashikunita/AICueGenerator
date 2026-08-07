@@ -255,6 +255,19 @@ _live_*.wav
 _live_*.ps1
 *.tmp
 
+# Audio sample tracks (local test material — never commit user music)
+*.mp3
+*.wav
+*.flac
+*.aac
+*.m4a
+*.ogg
+*.aiff
+*.aif
+
+# Exported rekordbox libraries (generated: yyyymmdd folders with copied audio + xml)
+exports/
+
 # Local environment overrides
 .env.local
 .env.*.local

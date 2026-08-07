@@ -26,9 +26,18 @@ class Settings(BaseSettings):
     # 開発時 (Vite dev server) に許可する Origin。本番は同一Origin配信のため不要。
     dev_origins: list[str] = ["http://127.0.0.1:5173", "http://localhost:5173"]
 
+    # rekordbox master.db の場所と鍵。未指定なら pyrekordbox が自動検出する。
+    rekordbox_db_path: str | None = None
+    rekordbox_key: str | None = None
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "app.db"
+
+    @property
+    def export_dir(self) -> Path:
+        # rekordbox XML と複製音源を書き出すライブラリの親ディレクトリ。
+        return self.data_dir / "exports"
 
     @property
     def static_dir(self) -> Path:

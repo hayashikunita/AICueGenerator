@@ -16,6 +16,8 @@ from ..schemas.jobs import (
     EvidenceOut,
     JobListResponse,
     JobSummary,
+    JobTrackListResponse,
+    JobTrackOut,
 )
 from .deps import get_manager, get_repo, require_token
 
@@ -63,6 +65,28 @@ def get_job(job_id: str, repo: Repository = Depends(get_repo)) -> JobSummary:
 @router.post("/jobs/{job_id}/cancel", status_code=202)
 def cancel_job(job_id: str, manager: JobManager = Depends(get_manager)) -> dict[str, bool]:
     return {"cancelled": manager.cancel(job_id)}
+
+
+@router.get("/jobs/{job_id}/tracks", response_model=JobTrackListResponse)
+def job_tracks(job_id: str, repo: Repository = Depends(get_repo)) -> JobTrackListResponse:
+    if repo.get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    out: list[JobTrackOut] = []
+    for jt in repo.list_job_tracks(job_id):
+        tr = repo.get_track(jt["track_id"])
+        if tr is None:
+            continue
+        out.append(
+            JobTrackOut(
+                id=tr["id"],
+                content_id=tr["content_id"],
+                path=tr["path"],
+                format=tr["format"],
+                duration_ms=tr["duration_ms"],
+                status=jt["status"],
+            )
+        )
+    return JobTrackListResponse(tracks=out)
 
 
 @router.get("/jobs/{job_id}/candidates", response_model=CandidateListResponse)

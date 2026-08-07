@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Header, HTTPException, Query, Request, status
 
 from ..config import get_settings
 from ..jobs.manager import JobManager
@@ -16,6 +16,25 @@ def require_token(request: Request, authorization: str | None = Header(default=N
     provided: str | None = None
     if authorization and authorization.lower().startswith("bearer "):
         provided = authorization[len("bearer ") :].strip()
+    if not verify_token(provided, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid or missing token",
+        )
+
+
+def require_token_query(
+    request: Request,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> None:
+    """ヘッダに加えクエリ `?token=` でも検証する（<audio> はヘッダを送れないため）。"""
+    expected: str = request.app.state.token
+    provided: str | None = None
+    if authorization and authorization.lower().startswith("bearer "):
+        provided = authorization[len("bearer ") :].strip()
+    elif token:
+        provided = token
     if not verify_token(provided, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
