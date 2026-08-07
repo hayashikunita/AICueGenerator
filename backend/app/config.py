@@ -30,9 +30,16 @@ class Settings(BaseSettings):
     rekordbox_db_path: str | None = None
     rekordbox_key: str | None = None
 
+    # API トークン。未指定なら data_dir/token に保存した値を再利用する（起動間で不変）。
+    token: str | None = None
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "app.db"
+
+    @property
+    def token_path(self) -> Path:
+        return self.data_dir / "token"
 
     @property
     def export_dir(self) -> Path:

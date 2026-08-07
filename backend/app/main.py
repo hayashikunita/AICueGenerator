@@ -20,7 +20,7 @@ from .api.routes_ws import router as ws_router
 from .config import get_settings
 from .jobs.manager import JobManager
 from .persistence.db import init_db
-from .security import generate_token
+from .security import resolve_token
 
 
 @asynccontextmanager
@@ -39,8 +39,8 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
 
-    # 起動ごとの一時トークン。REST/WS で検証する。
-    app.state.token = generate_token()
+    # トークンは data_dir に保存して再起動後も再利用する（AICUE_TOKEN で上書き可）。
+    app.state.token = resolve_token(override=settings.token, store_path=settings.token_path)
     # lifespan 未起動でも参照できるよう既定を用意（lifespan 起動時に差し替え）。
     app.state.manager = JobManager(settings.db_path)
 
@@ -88,7 +88,7 @@ def main() -> None:
     print(f"  {settings.app_name} v{settings.app_version}")
     print(f"  URL   : {url}")
     print(f"  Token : {token}")
-    print("  (127.0.0.1 限定。トークンは起動ごとに変わります)")
+    print("  (127.0.0.1 限定。トークンは保存され再起動後も同じです)")
     print("=" * 72)
 
     if settings.open_browser:
