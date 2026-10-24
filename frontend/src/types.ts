@@ -4,7 +4,7 @@ export type Band = "high" | "review" | "reject";
 export type CueKind = "MEMORY" | "HOT" | "BOTH";
 export type ExportMode = "COPY" | "EXISTING";
 export interface CollectionXml { source_id: string; filename: string; tracks: number }
-export type CueTarget = "INTRO_START" | "INTRO_END" | "OUTRO" | "OUTRO_END" | "CHORUS_START" | "CHORUS_END" | "CHORUS_END_MINUS_8_BARS" | "VOCAL_START" | "INTRO_BAR" | "INTRO_BAR_X2" | "INTRO_BAR_X3" | "INTRO_INTERVAL" | "INTRO_END_BEFORE" | "OUTRO_INTERVAL" | "OUTRO_END_BEFORE" | "FADE_END" | "FADE_END_BEFORE" | "TRACK_END" | "TRACK_END_BEFORE";
+export type CueTarget = "INTRO_START" | "INTRO_END" | "OUTRO" | "OUTRO_END" | "CHORUS_START" | "CHORUS_END" | "CHORUS_END_MINUS_8_BARS" | "VOCAL_START" | "VOCAL_END" | "INTRO_BAR" | "INTRO_BAR_X2" | "INTRO_BAR_X3" | "INTRO_INTERVAL" | "INTRO_END_BEFORE" | "OUTRO_INTERVAL" | "OUTRO_END_BEFORE" | "FADE_END" | "FADE_END_BEFORE" | "TRACK_END" | "TRACK_END_BEFORE";
 export type CueMode = "LEGACY" | "PURPOSE" | "INTRO_OUTRO";
 export interface IntroOutroSettings {
   targets: CueTarget[];
@@ -29,6 +29,8 @@ export interface Diagnostics {
 }
 
 export interface JobParams {
+  legacy_vocal_start?: boolean;
+  legacy_vocal_end?: boolean;
   cue_mode?: CueMode;
   intro_outro?: IntroOutroSettings | null;
   analysis_source?: "REKORDBOX" | "AUDIO";
@@ -119,6 +121,7 @@ export interface JobTrack {
 }
 
 export interface AnalysisInfo {
+  duration_ms?: number | null;
   ai_scope?: "FULL" | "VOCAL";
   vocal_analyzed_sec?: number;
   vocal_scan_complete?: boolean;
@@ -142,9 +145,11 @@ export interface AnalysisInfo {
   ai_model?: string;
   ai_cached?: boolean;
   vocal_start_sec?: number | null;
+  vocal_end_sec?: number | null;
+  vocal_end_requested?: boolean;
 }
 
-export interface AiStatus { available: boolean; model: string; local_only: boolean; reason: string | null; vocal_scan?: boolean }
+export interface AiStatus { available: boolean; model: string; local_only: boolean; reason: string | null; vocal_scan?: boolean; legacy_vocal_start?: boolean; vocal_end?: boolean }
 
 export interface GridPreview {
   content_id: string;

@@ -36,7 +36,7 @@ def fade_end_beat(levels: np.ndarray) -> int | None:
 
 def intro_outro_candidates(feat: BeatFeatures, grid: BeatGrid, base: list[CueCandidate],
                            sections: tuple[PhraseSection, ...], config: dict, duration: float,
-                           *, vocal_start: float | None = None, vocal_start_source: str = "LRC") -> tuple[list[CueCandidate], list[str]]:
+                           *, vocal_start: float | None = None, vocal_start_source: str = "LRC", vocal_end: float | None = None) -> tuple[list[CueCandidate], list[str]]:
     selected = list(dict.fromkeys(config.get("targets", INTRO_OUTRO_DEFAULT_TARGETS)))
     if not selected or any(target not in INTRO_OUTRO_TARGETS for target in selected):
         raise ValueError("イントロアウトロ特化の対象を選んでください。")
@@ -77,9 +77,9 @@ def intro_outro_candidates(feat: BeatFeatures, grid: BeatGrid, base: list[CueCan
     fade_bar = floor_bar(fade) if fade is not None else None
     for target in selected:
         count_before = len(result)
-        if target == "VOCAL_START":
+        if target in {"VOCAL_START", "VOCAL_END"}:
             vocal_candidates, _ = target_candidates(feat, grid, [], [target], (), top_k=1,
-                vocal_start=vocal_start, vocal_start_source=vocal_start_source, allow_vocal_fallback=False)
+                vocal_start=vocal_start, vocal_start_source=vocal_start_source, vocal_end=vocal_end, allow_vocal_fallback=False)
             result.extend(c for c in vocal_candidates if c.time_sec < duration)
         elif target in {"INTRO_START", "INTRO_END", "OUTRO", "OUTRO_END"}:
             point = points.get(target)
@@ -121,6 +121,9 @@ def intro_outro_candidates(feat: BeatFeatures, grid: BeatGrid, base: list[CueCan
         elif target == "TRACK_END" and last is not None:
             add(target, last, 85, f"音源ファイルの末尾{duration:.3f}秒より前にある最後の保存済み小節頭。末尾に新しい拍は作りません。")
         if len(result) == count_before:
+            if target == "VOCAL_END":
+                warnings.append("ボーカルの終わり：曲末までの分離結果から継続する声の終わりを確認できず、省略しました。AI補助を利用し、試聴で確認してください。LRCの最終行やVerse末尾では代用しません。")
+                continue
             if target == "VOCAL_START":
                 warnings.append("歌い始め：継続する声の開始や歌詞時刻を確認できなかったため省略しました。AI補助または同名LRCを利用し、試聴で確認してください。Verse先頭の置き換えは行いません。")
                 continue

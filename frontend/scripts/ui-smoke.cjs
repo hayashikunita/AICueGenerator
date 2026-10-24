@@ -17,6 +17,7 @@ let existingConflict=false, existingRace=false, sourceUploads=0, existingExports
 let aiAvailable=true;
 let vocalScanAvailable=true;
 let aiProgressPercent=34;
+let aiScanStart=0;
 function existingReview(data) {
   const tid='purpose-track';
   const chosen=xmlEntries(data).map(item=>({...item,track_id:tid}));
@@ -73,7 +74,7 @@ const server = http.createServer(async (req, res) => {
   }
   let result;
   if (url.pathname.endsWith('/diagnostics')) result = { process_running: false, db_key_available: true, schema_supported: true, writable: ++diag > 1, state: 'ok' };
-  else if (url.pathname.endsWith('/analysis/ai-status')) result={available:aiAvailable,model:'htdemucs',local_only:true,vocal_scan:vocalScanAvailable,reason:aiAvailable?null:'AI解析環境が未準備です。通常解析を使用できます。'};
+  else if (url.pathname.endsWith('/analysis/ai-status')) result={available:aiAvailable,model:'htdemucs',local_only:true,vocal_scan:vocalScanAvailable,legacy_vocal_start:true,vocal_end:true,reason:aiAvailable?null:'AI解析環境が未準備です。通常解析を使用できます。'};
   else if(url.pathname==='/api/v1/write/source-xml'&&req.method==='POST') {
     if(data.xml_text.includes('pyrekordbox')) {res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({detail:'アプリの出力XMLではなく、rekordboxのコレクションXMLを選んでください。'}));return;}
     sourceUploads++;result={source_id:'b'.repeat(32),filename:data.filename,tracks:1288};
@@ -99,9 +100,12 @@ const server = http.createServer(async (req, res) => {
     } else if (data.params.cue_mode==='INTRO_OUTRO') {
       purposeMode=true;
       candidates=data.params.intro_outro.targets.flatMap((type,i)=>Array.from({length:type.endsWith('_INTERVAL')?5:1},(_,n)=>({id:`special-${type}-${n}`,track_id:'purpose-track',run_id:'special-run',type,time_ms:1000+i*1000+n*500,original_time_ms:1000+i*1000+n*500,confidence:85,rank:n+1,beat:2+i*2+n,band:'high',evidence:[],accepted:null,cue_kind:null})));
+    } else if (data.params.legacy_vocal_start || data.params.legacy_vocal_end) {
+      purposeMode=true;
+      candidates=['INTRO_END','BREAK','BUILD','DROP','OUTRO',...(data.params.legacy_vocal_start?['VOCAL_START']:[]),...(data.params.legacy_vocal_end?['VOCAL_END']:[])].map((type,i)=>({id:'legacy-voice-'+i,track_id:'purpose-track',run_id:'legacy-voice-run',type,time_ms:2000+i*4000,original_time_ms:2000+i*4000,confidence:65,rank:1,beat:4+i*8,band:'review',evidence:[],accepted:null,cue_kind:null}));
     } else if (data.params.cue_targets) {
       purposeMode = true;
-      candidates = data.params.cue_targets.map((type,i)=>({id:'purpose-'+i,run_id:'purpose-run',type,time_ms:({CHORUS_START:4000,CHORUS_END:24000,CHORUS_END_MINUS_8_BARS:8000,VOCAL_START:6000,INTRO_START:0,INTRO_END:2000,OUTRO:27500,OUTRO_END:28000})[type],confidence:type==='VOCAL_START'?30:85,rank:1,beat:8,band:type==='VOCAL_START'?'reject':'high',evidence:[{name:'候補の位置と根拠',weight:100,score:type==='VOCAL_START'?.3:.85,detail:type==='VOCAL_START'?'Verse先頭の仮候補です。歌声は検出していません。':'rekordbox の Chorus フレーズ境界'}],accepted:null,cue_kind:null}));
+      candidates = data.params.cue_targets.map((type,i)=>({id:'purpose-'+i,run_id:'purpose-run',type,time_ms:({CHORUS_START:4000,CHORUS_END:24000,CHORUS_END_MINUS_8_BARS:8000,VOCAL_START:6000,VOCAL_END:26000,INTRO_START:0,INTRO_END:2000,OUTRO:27500,OUTRO_END:28000})[type],confidence:type==='VOCAL_START'?30:85,rank:1,beat:8,band:type==='VOCAL_START'?'reject':'high',evidence:[{name:'候補の位置と根拠',weight:100,score:type==='VOCAL_START'?.3:.85,detail:type==='VOCAL_START'?'Verse先頭の仮候補です。歌声は検出していません。':'rekordbox の Chorus フレーズ境界'}],accepted:null,cue_kind:null}));
       candidates.forEach(c=>c.original_time_ms=c.time_ms);
     }
     const jobId = batchMode ? memoryOverflowFixture ? 'batch-overflow' : 'batch' : 'one';
@@ -142,7 +146,7 @@ const server = http.createServer(async (req, res) => {
   else if (url.pathname === '/api/v1/jobs/ai-progress/tracks') result = {tracks:[{id:'ai-progress-track',content_id:'AI1',path:'C:/Music/Long song.wav',title:'Long song',format:'WAV',status:jobs.find(j=>j.id==='ai-progress').status==='RUNNING'?'RUNNING':'COMPLETED',duration_ms:440000,
     analysis:{source:'REKORDBOX',available:false,analysis_quality:'AI',ai_scope:jobs.find(j=>j.id==='ai-progress').params.ai_scope??'FULL',ai_started_at:new Date(Date.now()-103000).toISOString(),stage:'AIで音源を分離しています。',
       ai_progress:{phase:'SEPARATING',percent:aiProgressPercent,elapsed_sec:103,remaining_sec:197,
-        ...(jobs.find(j=>j.id==='ai-progress').params.ai_scope==='VOCAL'?{scope:'VOCAL',scan_start_sec:0,scan_end_sec:30,audio_duration_sec:440}:{})}}}]};
+        ...(jobs.find(j=>j.id==='ai-progress').params.ai_scope==='VOCAL'?{scope:'VOCAL',scan_start_sec:aiScanStart,scan_end_sec:aiScanStart+30,audio_duration_sec:440}:{})}}}]};
   else if (url.pathname === '/api/v1/jobs/metadata/tracks') result = {tracks:[metadataTrack]};
   else if (batchMode && url.pathname.endsWith('/tracks') && !url.pathname.includes('rekordbox')) result = {tracks:batchTracks};
   else if (url.pathname.endsWith('/analysis') && url.pathname.includes('/rekordbox/tracks/')) {
@@ -784,7 +788,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await call('Page.reload');
     await until("document.querySelectorAll('.job').length>0");
     await click('イントロアウトロ特化');
-    assert.equal(await evaluate("document.querySelectorAll('.intro-outro-settings input[type=checkbox]').length"),16);
+    assert.equal(await evaluate("document.querySelectorAll('.intro-outro-settings input[type=checkbox]').length"),17);
     assert.equal(await evaluate("document.querySelector('.intro-outro-settings input[value=VOCAL_START]').checked"),false);
     assert.equal(await evaluate("document.querySelector('#analysis-quality').closest('[hidden]')!==null"),true);
     await evaluate("(()=>{const e=document.querySelector('[aria-label=\"まとめて設定する小節数\"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'4');e.dispatchEvent(new Event('input',{bubbles:true}));})()");
@@ -807,7 +811,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.equal(await evaluate("document.querySelector('.start-analysis').disabled"),true);
     await click('すべて選ぶ');
     assert.equal(await evaluate("document.querySelector('#analysis-quality').closest('[hidden]')===null"),true);
-    await evaluate("document.querySelector('.intro-outro-settings input[value=VOCAL_START]').click()");
+    await evaluate("document.querySelector('.intro-outro-settings input[value=VOCAL_START]').click();document.querySelector('.intro-outro-settings input[value=VOCAL_END]').click()");
     await call('Page.reload');
     await until("document.querySelectorAll('.job').length>0");
     await click('イントロアウトロ特化');
@@ -880,6 +884,96 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.equal(decisionWrites,writesBeforeVocal);
     assert.equal(candidates.length,1);
     assert.equal(candidates[0].accepted,null);
+    await click('従来の候補');
+    await evaluate("document.querySelector('#legacy-vocal-start').click()");
+    await evaluate("document.querySelector('.legacy-vocal-option summary').click()");
+    await presetSelect('歌い始めのCue種類','BOTH');
+    await presetMemory('歌い始め Memory Cue の色','#9900ff');
+    await setColor('歌い始め Hot Cue の色','#00ff00');
+    await call('Page.reload');
+    await until("document.querySelector('#legacy-vocal-start')?.checked && document.querySelector('#analysis-quality')?.value==='AI'");
+    await click('ファイルパスから');
+    await input('audio-path','C:\\Music\\Legacy-and-voice.wav');
+    const beforeLegacyVoice=decisionWrites;
+    await click('解析を開始 →');
+    await until("document.querySelectorAll('.candidate-table tbody tr').length===6");
+    assert.equal(created.params.cue_mode,'LEGACY');
+    assert.equal(created.params.legacy_vocal_start,true);
+    assert.equal(created.params.cue_targets,undefined);
+    assert.equal(created.params.ai_scope,'VOCAL');
+    assert.equal(created.params.analysis_quality,'AI');
+    assert.equal(created.params.cue_settings.VOCAL_START.cue_kind,'BOTH');
+    assert.equal(created.params.cue_settings.VOCAL_START.memory_color,'#9900ff');
+    assert.equal(created.params.cue_settings.VOCAL_START.hot_color,'#00ff00');
+    assert.equal(decisionWrites,beforeLegacyVoice);
+    assert(candidates.every(c=>c.accepted===null));
+    assert.equal(await evaluate("document.querySelector('#analysis-result').textContent.includes('従来の候補＋歌い始め')"),true);
+    for(const width of [1440,390]) {
+      await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+      await evaluate("document.querySelector('.legacy-vocal-option').scrollIntoView()");
+      assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
+      const shot=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(out,`legacy-vocal-${width}.png`),Buffer.from(shot.data,'base64'));
+    }
+    await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+    await evaluate("document.querySelector('#legacy-vocal-start').click();document.querySelector('#legacy-vocal-end').click()");
+    await evaluate("document.querySelector('.legacy-vocal-end-option summary').click()");
+    await presetSelect('ボーカルの終わりのCue種類','BOTH');
+    await presetMemory('ボーカルの終わり Memory Cue の色','#9900ff');
+    await setColor('ボーカルの終わり Hot Cue の色','#00ff00');
+    await call('Page.reload');
+    await until("document.querySelector('#legacy-vocal-end')?.checked && !document.querySelector('#legacy-vocal-start')?.checked");
+    for (const mode of ['LEGACY','PURPOSE','INTRO_OUTRO']) {
+      await click(mode==='LEGACY'?'従来の候補':mode==='PURPOSE'?'目的から選ぶ':'イントロアウトロ特化');
+      if (mode!=='LEGACY') {
+        await click('選択を解除');
+        await evaluate(`document.querySelector('${mode==='PURPOSE'?'.cue-target-options':'.intro-outro-settings'} input[value=VOCAL_END]').click()`);
+      }
+      await select('analysis-quality','AI');
+      assert.equal(await evaluate("document.querySelector('#analysis-quality-help').textContent.includes('歌い始めを検出しても途中で分離を省略しません')"),true);
+      await click('ファイルパスから');
+      await input('audio-path','C:\\Music\\Vocal-end.wav');
+      const beforeEnd=decisionWrites;
+      const beforeEndRequest=created;
+      await click('解析を開始 →');
+      for(let attempt=0;attempt<100 && created===beforeEndRequest;attempt++) await sleep(50);
+      assert.notEqual(created,beforeEndRequest);
+      // This fixture reuses "one" for successive jobs; remount the result so
+      // completed-job polling does not leave the preceding fixture onscreen.
+      await call('Page.reload');
+      await until("document.querySelectorAll('.job').length>0");
+      await evaluate("document.querySelector('.job').click()");
+      await click(mode==='LEGACY'?'従来の候補':mode==='PURPOSE'?'目的から選ぶ':'イントロアウトロ特化');
+      const endCaption=mode==='LEGACY'?'従来の候補＋ボーカルの終わり':mode==='PURPOSE'?'指定位置：ボーカルの終わり':'イントロアウトロ特化：ボーカルの終わり';
+      await until(`document.querySelector('#analysis-result')?.textContent.includes(${JSON.stringify(endCaption)}) && document.querySelectorAll('.candidate-table tbody tr').length===${mode==='LEGACY'?6:1}`);
+      await until("Array.from(document.querySelectorAll('.candidate-type-cell')).some(e=>e.textContent.includes('ボーカルの終わり'))");
+      assert.equal(created.params.cue_mode,mode);
+      assert.equal(created.params.ai_scope,'VOCAL');
+      assert.equal(created.params.analysis_quality,'AI');
+      if(mode==='LEGACY') {
+        assert.equal(created.params.legacy_vocal_end,true);
+        assert.equal(created.params.legacy_vocal_start,false);
+        assert.equal(created.params.cue_targets,undefined);
+        assert.equal(candidates.length,6);
+      } else {
+        assert.deepEqual(mode==='PURPOSE'?created.params.cue_targets:created.params.intro_outro.targets,['VOCAL_END']);
+        assert.equal(candidates.length,1);
+      }
+      assert.equal(created.params.cue_settings.VOCAL_END.cue_kind,'BOTH');
+      assert.equal(created.params.cue_settings.VOCAL_END.memory_color,'#9900ff');
+      assert.equal(created.params.cue_settings.VOCAL_END.hot_color,'#00ff00');
+      assert.equal(decisionWrites,beforeEnd);
+      assert(candidates.every(c=>c.accepted===null));
+    }
+    for(const width of [1440,390]) {
+      await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+      await evaluate("document.querySelectorAll('.toast-dismiss').forEach(button=>button.click())");
+      await evaluate("document.querySelector('.intro-outro-settings input[value=VOCAL_END]').closest('.intro-outro-group').scrollIntoView()");
+      assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
+      const shot=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(out,`vocal-end-${width}.png`),Buffer.from(shot.data,'base64'));
+    }
+    await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+    await click('選択を解除');
+    await evaluate("document.querySelector('.intro-outro-settings input[value=VOCAL_START]').click()");
     vocalScanAvailable=false;
     await call('Page.reload');
     await until("document.querySelector('#analysis-quality')?.value==='AI'");
@@ -902,7 +996,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     aiProgressPercent=67;
     await until("document.querySelector('progress[aria-label=\"この曲の音源分離\"]')?.value===67");
     jobs[0].params.ai_scope='VOCAL';
-    await until("document.querySelector('.analysis-progress-info')?.textContent.includes('この区間のボーカル分離：67%') && document.querySelector('.analysis-progress-info')?.textContent.includes('確認範囲 0:00〜0:30')");
+    await until("document.querySelector('.analysis-progress-info')?.textContent.includes('区間内の分離 67%') && document.querySelector('.analysis-progress-info')?.textContent.includes('現在の確認範囲：0:00〜0:30')");
+    assert.equal(await evaluate("document.querySelector('progress[aria-label=\"曲内の確認済み範囲\"]').value"),0);
+    aiScanStart=30;aiProgressPercent=0;
+    await until("document.querySelector('progress[aria-label=\"曲内の確認済み範囲\"]')?.value===30 && document.querySelector('.analysis-progress-info').textContent.includes('区間内の分離 0%')");
+    aiScanStart=60;
+    await until("document.querySelector('progress[aria-label=\"曲内の確認済み範囲\"]')?.value===60");
+    assert.equal(await evaluate("document.querySelector('.analysis-progress-info').textContent.includes('確認済み：1:00／7:20')"),true);
+    aiScanStart=30;
+    await until("document.querySelector('.analysis-progress-info')?.textContent.includes('現在の確認範囲：0:30〜1:00')");
+    assert.equal(await evaluate("document.querySelector('progress[aria-label=\"曲内の確認済み範囲\"]').value"),60,'late poll responses must not move coverage backwards');
+    aiScanStart=60;
+    await until("document.querySelector('.analysis-progress-info')?.textContent.includes('現在の確認範囲：1:00〜1:30')");
+    jobs[0].params.legacy_vocal_end=true;
+    await until("document.querySelector('.analysis-progress-info')?.textContent.includes('歌い始めを検出しても曲末まで解析を続けます')");
     for(const width of [1440,390]) {
       await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
       await evaluate("document.querySelector('.analysis-progress-info').scrollIntoView()");

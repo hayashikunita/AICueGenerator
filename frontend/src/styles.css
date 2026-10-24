@@ -932,3 +932,5 @@ button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex="0"]:foc
 }
 .analysis-progress-info { margin: 14px 0; padding: 12px; border: 1px solid #3d526b; background: #121c27; overflow-wrap: anywhere; }
 .analysis-progress-info p { margin: 8px 0; }
+.legacy-vocal-option > label { display: flex; align-items: center; gap: 8px; }
+.legacy-vocal-option > label > input[type="checkbox"] { width: auto; margin: 0; flex: 0 0 auto; }

@@ -47,3 +47,28 @@ def vocal_start_from_stems(data: dict) -> float | None:
             beginning -= 1
         return beginning * hop
     return None
+
+
+def vocal_end_from_stems(data: dict) -> float | None:
+    """Last sustained voice's exclusive end, only with complete song coverage.
+
+    Reverse the envelope so the onset detector's duration, occupancy and quiet
+    edge recovery also reject isolated sounds after the last vocal phrase.
+    An LRC's last line timestamp is a start and cannot supply this boundary.
+    """
+    import math
+
+    duration, hop = data.get("duration_sec"), data.get("hop_sec")
+    if (not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0
+            or not isinstance(hop, (int, float)) or not math.isfinite(hop) or not .01 <= hop <= .5):
+        return None
+    if data.get("schema") == 2:
+        if data.get("scan_complete") is not True or data.get("analyzed_sec") != duration:
+            return None
+    elif data.get("schema") != 1:
+        return None
+    vocals, mix = data.get("stems", {}).get("vocals"), data.get("mix")
+    if vocals is None or mix is None or len(vocals) != math.ceil(duration / hop) or len(mix) != len(vocals):
+        return None
+    onset = vocal_start_from_stems({"stems": {"vocals": vocals[::-1]}, "mix": mix[::-1], "hop_sec": hop})
+    return min(duration, len(vocals) * hop - onset) if onset is not None else None

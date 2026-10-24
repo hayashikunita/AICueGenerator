@@ -1,4 +1,5 @@
 CUE_TARGET_LABELS = {
+    "VOCAL_END": "ボーカルの終わり",
     "INTRO_BAR": "イントロの指定小節目", "INTRO_BAR_X2": "イントロの指定小節目×2", "INTRO_BAR_X3": "イントロの指定小節目×3",
     "INTRO_START": "イントロの始まり", "OUTRO": "アウトロの始まり",
     "INTRO_END": "イントロの終わり", "OUTRO_END": "アウトロの終わり",
@@ -16,9 +17,9 @@ INTRO_OUTRO_TARGETS = (
     "INTRO_START", "INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3", "INTRO_INTERVAL", "INTRO_END_BEFORE", "INTRO_END",
     "OUTRO", "OUTRO_INTERVAL", "OUTRO_END_BEFORE", "OUTRO_END",
     "FADE_END_BEFORE", "FADE_END", "TRACK_END_BEFORE", "TRACK_END",
-    "VOCAL_START",
+    "VOCAL_START", "VOCAL_END",
 )
-INTRO_OUTRO_DEFAULT_TARGETS = tuple(target for target in INTRO_OUTRO_TARGETS if target != "VOCAL_START")
+INTRO_OUTRO_DEFAULT_TARGETS = tuple(target for target in INTRO_OUTRO_TARGETS if target not in {"VOCAL_START", "VOCAL_END"})
 
 
 def cue_target_label(target: str, params: dict | None = None) -> str:

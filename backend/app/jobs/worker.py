@@ -13,7 +13,7 @@ from typing import Any
 
 from ..analysis.pipeline import analyze_file
 from ..analysis.ai import analyze_stems, AnalysisCancelled
-from ..analysis.vocals import vocal_start_from_stems
+from ..analysis.vocals import vocal_start_from_stems, vocal_end_from_stems
 from ..common import ENGINE_VERSION, dumps, utcnow_iso
 from ..config import get_settings
 from ..domain.enums import BeatSource
@@ -140,7 +140,10 @@ def _process_track(
             repo.set_job_track_analysis(job_id, track_id, analysis)
         stems = None
         specialized = params.get("cue_mode") == "INTRO_OUTRO"
-        vocal_requested = "VOCAL_START" in (params.get("intro_outro") or {}).get("targets", [])
+        voice_targets = (params.get("intro_outro") or {}).get("targets", []) if specialized else params.get("cue_targets") or [target for target, enabled in (("VOCAL_START", params.get("legacy_vocal_start")), ("VOCAL_END", params.get("legacy_vocal_end"))) if enabled]
+        vocal_requested = bool({"VOCAL_START", "VOCAL_END"}.intersection(voice_targets))
+        require_end = "VOCAL_END" in voice_targets
+        analysis["vocal_end_requested"] = require_end
         if params.get("analysis_quality") == "AI" and (not specialized or vocal_requested):
             analysis.update(available=False, analysis_quality="AI", ai_started_at=utcnow_iso(), stage="AI音源分離を準備しています…")
             repo.set_job_track_analysis(job_id, track_id, analysis)
@@ -154,20 +157,22 @@ def _process_track(
 
             vocal_only = params.get("ai_scope") == "VOCAL"
             analysis["ai_scope"] = "VOCAL" if vocal_only else "FULL"
-            stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed, vocal_only=vocal_only)
+            stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed, vocal_only=vocal_only, require_end=require_end)
             if source == "REKORDBOX":
                 with open_rekordbox(path=settings.rekordbox_db_path, key=settings.rekordbox_key) as db:
                     latest_snapshot = load_track_analysis(db, str(track["content_id"]), path)
                 if hashlib.sha256(dumps(latest_snapshot).encode("utf-8")).hexdigest() != source_fingerprint:
                     raise ValueError("AI処理中にrekordboxのグリッド・フレーズ・Cue情報が変わりました。解析情報を再取得して実行し直してください。")
             analysis.update(ai_model=stems["model"], ai_cached=cached_stems,
-                            vocal_start_sec=vocal_start_from_stems(stems), stage="音色・和音・ボーカルとフレーズを照合しています…")
+                            vocal_start_sec=vocal_start_from_stems(stems), vocal_end_sec=vocal_end_from_stems(stems) if require_end else None, stage="音色・和音・ボーカルとフレーズを照合しています…")
             if stems.get("scope") == "VOCAL":
                 analysis.update(vocal_analyzed_sec=stems["analyzed_sec"], vocal_scan_complete=stems["scan_complete"])
             repo.set_job_track_analysis(job_id, track_id, analysis)
         result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, beats_per_phrase=beats_per_phrase, top_k=top_k, beatgrid=grid, phrase_boundaries=phrase_boundaries,
                               phrase_sections=phrase_sections, cue_targets=params.get("cue_targets"), end_alignment_bars=params.get("end_alignment_bars", 1),
-                              stem_analysis=stems, intro_outro=(params.get("intro_outro") or {}) if specialized else None)
+                              stem_analysis=stems, intro_outro=(params.get("intro_outro") or {}) if specialized else None,
+                              legacy_vocal_start=bool(params.get("legacy_vocal_start") and params.get("cue_mode", "LEGACY") == "LEGACY" and not params.get("cue_targets")),
+                              legacy_vocal_end=bool(params.get("legacy_vocal_end") and params.get("cue_mode", "LEGACY") == "LEGACY" and not params.get("cue_targets")))
         if specialized:
             analysis.update(cue_mode="INTRO_OUTRO", analysis_quality="AI" if stems is not None else "STANDARD", section_labels_used=any(s.kind in {"INTRO", "OUTRO"} for s in phrase_sections))
         analysis.pop("stage", None)

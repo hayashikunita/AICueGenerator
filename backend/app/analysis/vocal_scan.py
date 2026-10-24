@@ -25,7 +25,7 @@ def confirmed_early_voice(data: dict) -> bool:
     return np.count_nonzero(strong) * hop >= 1.5
 
 
-def scan_vocals(duration: float, separate, *, on_window=None, window_sec: int = 30) -> dict:
+def scan_vocals(duration: float, separate, *, on_window=None, window_sec: int = 30, require_end: bool = False) -> dict:
     if not math.isfinite(duration) or duration <= 0 or window_sec <= 0:
         raise ValueError("Invalid vocal scan duration")
     result = {"schema": 2, "model": "htdemucs", "scope": "VOCAL", "hop_sec": .1,
@@ -42,6 +42,6 @@ def scan_vocals(duration: float, separate, *, on_window=None, window_sec: int = 
         result["mix"].extend(mix)
         result["stems"]["vocals"].extend(vocals)
         result.update(analyzed_sec=end, scan_complete=end == duration)
-        if result["scan_complete"] or confirmed_early_voice(result):
+        if result["scan_complete"] or (not require_end and confirmed_early_voice(result)):
             break
     return result

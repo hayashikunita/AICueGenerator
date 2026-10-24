@@ -20,6 +20,7 @@ export const INTRO_OUTRO_GROUPS: { label: string; targets: { value: CueTarget; l
   ] },
   { label: "ボーカル", targets: [
     { value: "VOCAL_START", label: "歌い始め" },
+    { value: "VOCAL_END", label: "ボーカルの終わり" },
   ] },
   { label: "フェードの終わり", targets: [
     { value: "FADE_END_BEFORE", label: "曲の音量が小さくなる終わりの手前", field: "fade_before_bars", template: "曲の音量が小さくなる終わりから{n}小節前" },
@@ -33,7 +34,7 @@ export const INTRO_OUTRO_GROUPS: { label: string; targets: { value: CueTarget; l
 export const INTRO_OUTRO_TARGETS = INTRO_OUTRO_GROUPS.flatMap((group) => group.targets);
 export const INTRO_OUTRO_KEY = "aicue.introOutro";
 export function defaultIntroOutro(): IntroOutroSettings {
-  return { targets: INTRO_OUTRO_TARGETS.filter((target) => target.value !== "VOCAL_START").map((target) => target.value), intro_position_bars: 8, intro_interval_bars: 8, intro_before_bars: 8, outro_interval_bars: 8, outro_before_bars: 8, fade_before_bars: 8, track_before_bars: 8 };
+  return { targets: INTRO_OUTRO_TARGETS.filter((target) => !["VOCAL_START", "VOCAL_END"].includes(target.value)).map((target) => target.value), intro_position_bars: 8, intro_interval_bars: 8, intro_before_bars: 8, outro_interval_bars: 8, outro_before_bars: 8, fade_before_bars: 8, track_before_bars: 8 };
 }
 export function introOutroLabel(target: CueTarget, value: IntroOutroSettings): string {
   const option = INTRO_OUTRO_TARGETS.find((item) => item.value === target);

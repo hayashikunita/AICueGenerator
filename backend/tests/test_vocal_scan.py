@@ -70,6 +70,23 @@ def test_ambiguous_quiet_voice_and_instrumental_are_checked_to_song_end():
     ai.validate_stems(instrumental)
 
 
+def test_repeated_window_percentages_still_terminate_at_song_end_without_repeating_ranges():
+    calls, windows = [], []
+    duration = 250.98448979591836
+
+    def separate(start, end):
+        calls.append((start, end))
+        count = math.ceil(end / .1) - round(start / .1)
+        return [.2] * count, [0] * count
+
+    result = scan_vocals(duration, separate, on_window=windows.append)
+    assert len(calls) == 9
+    assert [start for start, _ in calls] == list(range(0, 241, 30))
+    assert calls[-1] == (240, duration)
+    assert [w["scan_start_sec"] for w in windows] == list(range(0, 241, 30))
+    assert result["scan_complete"] and result["analyzed_sec"] == duration
+
+
 @pytest.mark.parametrize("change", [
     lambda d: d.update(analyzed_sec=121), lambda d: d.update(scan_complete=True),
     lambda d: d.update(analyzed_sec=float("nan")), lambda d: d["stems"]["vocals"].pop(),

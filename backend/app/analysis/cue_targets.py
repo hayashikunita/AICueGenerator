@@ -35,7 +35,7 @@ def target_candidates(
     targets: list[str], sections: tuple[PhraseSection, ...] = (),
     *, top_k: int = 3, vocal_start: float | None = None, end_alignment_bars: int = 1,
     vocal_start_source: str = "LRC", repetition_scores: np.ndarray | None = None,
-    allow_vocal_fallback: bool = True,
+    allow_vocal_fallback: bool = True, vocal_end: float | None = None,
 ) -> tuple[list[CueCandidate], list[str]]:
     times = np.asarray(grid.beat_times)
     bars = np.asarray(grid.downbeat_indices, dtype=int)
@@ -151,6 +151,12 @@ def target_candidates(
             if target == "CHORUS_START":
                 for beat in partial_starts:
                     add(target, beat, 85, "rekordbox の Chorus 先頭。末尾はグリッド外のため未取得です。")
+        elif target == "VOCAL_END":
+            if vocal_end is not None and np.isfinite(vocal_end) and vocal_end > 0:
+                beat = int(np.argmin(np.abs(times - vocal_end)))
+                add(target, beat, 65, f"HTDemucsで曲末まで確認し、最後の継続するボーカルが終わる {vocal_end:.3f}秒を最寄りの拍 {times[beat]:.3f}秒へ合わせた候補（差 {times[beat] - vocal_end:+.3f}秒）。短い単発音・弱い分離漏れを除きます。歌詞認識ではなく、長い掛け声・話し声や残響を含む可能性があるため試聴してください。", aligned=False)
+            else:
+                warnings.append("ボーカルの終わり：曲末までの分離結果から継続する声の終わりを確認できず、省略しました。AI補助で解析するか、試聴して位置を指定してください。LRCの最終行やVerse末尾では代用しません。")
         elif target == "VOCAL_START":
             if vocal_start is not None and 0 <= vocal_start <= times[-1]:
                 beat = int(np.argmin(np.abs(times - vocal_start)))

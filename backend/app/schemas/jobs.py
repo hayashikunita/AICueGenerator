@@ -26,7 +26,7 @@ class CuePreset(BaseModel):
 
 
 class IntroOutroSettings(BaseModel):
-    targets: list[Literal["INTRO_START", "INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3", "INTRO_INTERVAL", "INTRO_END_BEFORE", "INTRO_END", "OUTRO", "OUTRO_INTERVAL", "OUTRO_END_BEFORE", "OUTRO_END", "FADE_END_BEFORE", "FADE_END", "TRACK_END_BEFORE", "TRACK_END", "VOCAL_START"]] = Field(default_factory=lambda: list(INTRO_OUTRO_DEFAULT_TARGETS), min_length=1, max_length=16)
+    targets: list[Literal["INTRO_START", "INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3", "INTRO_INTERVAL", "INTRO_END_BEFORE", "INTRO_END", "OUTRO", "OUTRO_INTERVAL", "OUTRO_END_BEFORE", "OUTRO_END", "FADE_END_BEFORE", "FADE_END", "TRACK_END_BEFORE", "TRACK_END", "VOCAL_START", "VOCAL_END"]] = Field(default_factory=lambda: list(INTRO_OUTRO_DEFAULT_TARGETS), min_length=1, max_length=17)
     intro_position_bars: int = Field(default=8, ge=1, le=128)
     intro_interval_bars: int = Field(default=8, ge=1, le=128)
     intro_before_bars: int = Field(default=8, ge=1, le=128)
@@ -38,6 +38,8 @@ class IntroOutroSettings(BaseModel):
 
 class JobParams(BaseModel):
     cue_mode: Literal["LEGACY", "PURPOSE", "INTRO_OUTRO"] = "LEGACY"
+    legacy_vocal_start: bool = False
+    legacy_vocal_end: bool = False
     intro_outro: IntroOutroSettings | None = None
     analysis_source: Literal["REKORDBOX", "AUDIO"] = "AUDIO"
     analysis_quality: Literal["STANDARD", "AI"] = "STANDARD"
@@ -46,7 +48,7 @@ class JobParams(BaseModel):
     bars_per_phrase: int = Field(default=16, ge=1, le=128)
     beats_per_phrase: int | None = Field(default=None, ge=4, le=512, multiple_of=4, description="4/4拍子の解析単位。指定時は小節数より優先")
     top_k: int = Field(default=3, ge=1, le=20)
-    cue_targets: list[Literal["INTRO_START", "INTRO_END", "OUTRO", "OUTRO_END", "CHORUS_START", "CHORUS_END", "CHORUS_END_MINUS_8_BARS", "VOCAL_START"]] | None = Field(default=None, min_length=1, max_length=8)
+    cue_targets: list[Literal["INTRO_START", "INTRO_END", "OUTRO", "OUTRO_END", "CHORUS_START", "CHORUS_END", "CHORUS_END_MINUS_8_BARS", "VOCAL_START", "VOCAL_END"]] | None = Field(default=None, min_length=1, max_length=9)
     cue_default: CuePreset | None = None
     cue_settings: dict[CueType, CuePreset] = Field(default_factory=dict)
     end_alignment_bars: Literal[1, 4, 8, 16] = 1
@@ -56,11 +58,14 @@ class JobParams(BaseModel):
         if self.cue_mode == "INTRO_OUTRO":
             if self.intro_outro is None:
                 self.intro_outro = IntroOutroSettings()
-            if "VOCAL_START" not in self.intro_outro.targets:
+            if not {"VOCAL_START", "VOCAL_END"}.intersection(self.intro_outro.targets):
                 self.analysis_quality = "STANDARD"  # Separation is only useful when requested.
             self.cue_targets = None
-        targets = self.intro_outro.targets if self.cue_mode == "INTRO_OUTRO" else self.cue_targets or []
-        if self.ai_scope == "VOCAL" and "VOCAL_START" not in targets:
+        if self.cue_mode != "LEGACY" or self.cue_targets is not None:
+            self.legacy_vocal_start = False
+            self.legacy_vocal_end = False
+        targets = self.intro_outro.targets if self.cue_mode == "INTRO_OUTRO" else self.cue_targets or ([target for target, enabled in (("VOCAL_START", self.legacy_vocal_start), ("VOCAL_END", self.legacy_vocal_end)) if enabled])
+        if self.ai_scope == "VOCAL" and not {"VOCAL_START", "VOCAL_END"}.intersection(targets):
             self.analysis_quality = "STANDARD"
         return self
 

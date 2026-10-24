@@ -16,7 +16,7 @@ from .features import extract_features
 from .phrases import PhraseGrid, best_phase_grid, phrase_grids
 from .structure import generate_candidates
 from .structure_evidence import boundary_strengths, repeated_section_scores
-from .vocals import vocal_start_from_stems
+from .vocals import vocal_start_from_stems, vocal_end_from_stems
 from .intro_outro import intro_outro_candidates
 
 # PSSI フレーズ型 → Cue 種別の対応（整合時に加点）。型番号は仮置きで P0 S8 後に確定。
@@ -44,8 +44,11 @@ def analyze_waveform(
     end_alignment_bars: int = 1,
     vocal_start: float | None = None,
     vocal_start_source: str = "LRC",
+    vocal_end: float | None = None,
     stem_analysis: dict | None = None,
     intro_outro: dict | None = None,
+    legacy_vocal_start: bool = False,
+    legacy_vocal_end: bool = False,
     fingerprint: str = "n/a",
     top_k: int = 3,
 ) -> AnalysisResult:
@@ -61,6 +64,8 @@ def analyze_waveform(
     y = np.asarray(y, dtype=float)
     duration = len(y) / sr if sr else 0.0
     warnings: list[str] = []
+    if vocal_end is not None and (not np.isfinite(vocal_end) or not 0 < vocal_end <= duration):
+        vocal_end = None
 
     if beatgrid is not None:
         times = np.asarray(beatgrid.beat_times, dtype=float)
@@ -118,13 +123,19 @@ def analyze_waveform(
     )
     if intro_outro is not None:
         candidates, target_warnings = intro_outro_candidates(feat, grid.to_domain(), candidates, phrase_sections, intro_outro, duration,
-            vocal_start=vocal_start, vocal_start_source=vocal_start_source)
+            vocal_start=vocal_start, vocal_start_source=vocal_start_source, vocal_end=vocal_end)
         warnings.extend(target_warnings)
     elif cue_targets is not None:
         candidates, target_warnings = target_candidates(feat, grid.to_domain(), candidates, cue_targets,
                                                         phrase_sections, top_k=top_k, vocal_start=vocal_start,
-                                                        vocal_start_source=vocal_start_source, end_alignment_bars=end_alignment_bars,
+                                                        vocal_start_source=vocal_start_source, vocal_end=vocal_end, end_alignment_bars=end_alignment_bars,
                                                         repetition_scores=repeated_section_scores(feat, downbeats))
+        warnings.extend(target_warnings)
+    elif legacy_vocal_start or legacy_vocal_end:
+        voice_targets = [target for target, enabled in (("VOCAL_START", legacy_vocal_start), ("VOCAL_END", legacy_vocal_end)) if enabled]
+        vocal_candidates, target_warnings = target_candidates(feat, grid.to_domain(), [], voice_targets, (),
+            top_k=1, vocal_start=vocal_start, vocal_start_source=vocal_start_source, vocal_end=vocal_end, allow_vocal_fallback=False)
+        candidates.extend(vocal_candidates)
         warnings.extend(target_warnings)
     candidates.sort(key=lambda c: (c.cue_type.value, c.rank))
 
@@ -145,6 +156,8 @@ def analyze_file(
     end_alignment_bars: int = 1,
     stem_analysis: dict | None = None,
     intro_outro: dict | None = None,
+    legacy_vocal_start: bool = False,
+    legacy_vocal_end: bool = False,
 ) -> AnalysisResult:
     """音源ファイルをデコードして解析する（soundfile/librosa 必須）。"""
     from .decode import decode_mono
@@ -153,14 +166,19 @@ def analyze_file(
     import hashlib
 
     decoded = decode_mono(path)
+    legacy_vocal_start = legacy_vocal_start and intro_outro is None and cue_targets is None
+    legacy_vocal_end = legacy_vocal_end and intro_outro is None and cue_targets is None
     if intro_outro is not None:
-        cue_targets = ["VOCAL_START"] if "VOCAL_START" in intro_outro.get("targets", INTRO_OUTRO_DEFAULT_TARGETS) else None
+        cue_targets = [target for target in intro_outro.get("targets", INTRO_OUTRO_DEFAULT_TARGETS) if target in {"VOCAL_START", "VOCAL_END"}] or None
         if not cue_targets:
             stem_analysis = None
     fp = audio_fingerprint(path)
+    vocal_requested = legacy_vocal_start or bool(cue_targets and "VOCAL_START" in cue_targets)
+    end_requested = legacy_vocal_end or bool(cue_targets and "VOCAL_END" in cue_targets)
+    vocal_end = vocal_end_from_stems(stem_analysis) if end_requested and stem_analysis is not None else None
     vocal_start = None
     lyric_warnings = []
-    if cue_targets and "VOCAL_START" in cue_targets:
+    if vocal_requested:
         lyrics = Path(path).with_suffix(".lrc")
         payload = b"none"
         try:
@@ -174,13 +192,13 @@ def analyze_file(
             lyric_warnings.append("同名LRCを読み込めませんでした。")
         fp = "sha256:" + hashlib.sha256(fp.encode() + hashlib.sha256(payload).digest()).hexdigest()
     vocal_source = "LRC"
-    if vocal_start is None and stem_analysis is not None and cue_targets and "VOCAL_START" in cue_targets:
+    if vocal_start is None and stem_analysis is not None and vocal_requested:
         vocal_start = vocal_start_from_stems(stem_analysis)
         vocal_source = "DEMUCS"
         if stem_analysis.get("scope") == "VOCAL":
             vocal_source = "DEMUCS_VOCAL"
         if vocal_start is None:
-            lyric_warnings.append("分離したボーカルから継続する開始位置を特定できませんでした。" + ("歌い始めの候補は省略します。" if intro_outro is not None else "Verse先頭がある場合は仮候補として表示します。"))
+            lyric_warnings.append("分離したボーカルから継続する開始位置を特定できませんでした。" + ("歌い始めの候補は省略します。" if intro_outro is not None or legacy_vocal_start else "Verse先頭がある場合は仮候補として表示します。"))
     if stem_analysis is not None:
         import json
         fp = "sha256:" + hashlib.sha256(fp.encode() + json.dumps(stem_analysis, sort_keys=True).encode()).hexdigest()
@@ -197,8 +215,11 @@ def analyze_file(
         end_alignment_bars=end_alignment_bars,
         vocal_start=vocal_start,
         vocal_start_source=vocal_source,
+        vocal_end=vocal_end,
         stem_analysis=stem_analysis,
         intro_outro=intro_outro,
+        legacy_vocal_start=legacy_vocal_start,
+        legacy_vocal_end=legacy_vocal_end,
         top_k=top_k,
         fingerprint=fp,
     )

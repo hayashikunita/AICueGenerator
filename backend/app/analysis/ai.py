@@ -35,7 +35,7 @@ def ai_status() -> dict:
     except (OSError, ValueError):
         prepared = {}
     available = executable.is_file() and prepared.get("prepared") is True and prepared.get("model") == "htdemucs"
-    return {"available": available, "model": "htdemucs", "local_only": True, "vocal_scan": True,
+    return {"available": available, "model": "htdemucs", "local_only": True, "vocal_scan": True, "legacy_vocal_start": True, "vocal_end": True,
             "reason": None if available else "AI解析環境・モデルが未準備です。通常解析はそのまま使えます。"}
 
 
@@ -66,19 +66,22 @@ def validate_stems(data: dict) -> dict:
     return data
 
 
-def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal_only: bool = False) -> tuple[dict, bool]:
+def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal_only: bool = False, require_end: bool = False) -> tuple[dict, bool]:
     if not ai_status()["available"]:
         raise ValueError("AI解析環境・モデルが未準備です。通常解析を選ぶか、AI環境を準備してください。")
     original_fingerprint = audio_fingerprint(path)
-    key = hashlib.sha256(((VOCAL_REVISION if vocal_only else AI_REVISION) + original_fingerprint).encode()).hexdigest()
+    revision = (VOCAL_REVISION + ("-full" if require_end else "")) if vocal_only else AI_REVISION
+    key = hashlib.sha256((revision + original_fingerprint).encode()).hexdigest()
     cache = get_settings().data_dir / "ai-cache"
     cache.mkdir(parents=True, exist_ok=True)
     output = cache / f"{key}.json"
 
-    def cached():
+    def cached(candidate=output):
         try:
-            data = validate_stems(json.loads(output.read_text(encoding="utf-8")))
-            return data if data["schema"] == (2 if vocal_only else 1) else None
+            data = validate_stems(json.loads(candidate.read_text(encoding="utf-8")))
+            if data["schema"] != (2 if vocal_only else 1):
+                return None
+            return data if not (vocal_only and require_end) or data["scan_complete"] else None
         except (OSError, ValueError, TypeError, AttributeError):
             return None
 
@@ -101,6 +104,12 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
             raise AnalysisCancelled()
         data = cached()
         if data is None and vocal_only:
+            # Completed vocal scans serve both start and end requests. A partial
+            # start scan cannot determine the last vocal in the song.
+            alternate = VOCAL_REVISION + ("" if require_end else "-full")
+            alternate_key = hashlib.sha256((alternate + original_fingerprint).encode()).hexdigest()
+            data = cached(cache / f"{alternate_key}.json")
+        if data is None and vocal_only:
             # Previously completed full-song analysis already contains the voice.
             # Reuse it without running the model again, discarding other stems.
             full_key = hashlib.sha256((AI_REVISION + original_fingerprint).encode()).hexdigest()
@@ -120,7 +129,7 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
         environment = {**os.environ, "TORCH_HOME": str(models), "OMP_NUM_THREADS": "4"}
         # shell=False keeps arbitrary audio filenames out of shell syntax.
         with log.open("w", encoding="utf-8") as stream:
-            process = subprocess.Popen([str(executable), "-u", str(worker), "--audio", path, "--output", str(output), "--model-dir", str(models)] + (["--vocal-only"] if vocal_only else []),
+            process = subprocess.Popen([str(executable), "-u", str(worker), "--audio", path, "--output", str(output), "--model-dir", str(models)] + (["--vocal-only"] if vocal_only else []) + (["--vocal-end"] if vocal_only and require_end else []),
                                        stdout=stream, stderr=stream, env=environment,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             started = time.monotonic()

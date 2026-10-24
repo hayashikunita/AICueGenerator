@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--vocal-only", action="store_true")
+    parser.add_argument("--vocal-end", action="store_true")
     args = parser.parse_args()
     os.environ["TORCH_HOME"] = args.model_dir
     import numpy as np
@@ -80,7 +81,7 @@ def main() -> None:
 
             return core_envelope(wav), core_envelope(voice)
 
-        result = scan_vocals(info.duration, separate,
+        result = scan_vocals(info.duration, separate, require_end=args.vocal_end,
             on_window=lambda progress: print("AICUE_SCAN " + json.dumps(progress), flush=True))
         temporary = output.with_suffix(".tmp")
         temporary.write_text(json.dumps(result, allow_nan=False), encoding="utf-8")

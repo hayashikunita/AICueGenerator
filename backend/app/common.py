@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 # 解析エンジンのバージョン。候補の再現性・キャッシュ判定に用いる（§9.4）。
-ENGINE_VERSION = "0.7.0"
+ENGINE_VERSION = "0.8.0"
 
 
 def new_id() -> str:

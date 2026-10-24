@@ -31,12 +31,18 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
   const [phraseUnit, setPhraseUnit] = useState<"beats" | "bars">("beats");
   const [topK, setTopK] = useState("3");
   const [cueMode, setCueMode] = useState<CueMode>("LEGACY");
+  const [legacyVocal, setLegacyVocal] = useState(() => { try { return localStorage.getItem("aicue.legacyVocalStart") === "true"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem("aicue.legacyVocalStart", String(legacyVocal)); } catch { /* Optional preference. */ } }, [legacyVocal]);
+  const [legacyVocalEnd, setLegacyVocalEnd] = useState(() => { try { return localStorage.getItem("aicue.legacyVocalEnd") === "true"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem("aicue.legacyVocalEnd", String(legacyVocalEnd)); } catch { /* Optional preference. */ } }, [legacyVocalEnd]);
   const targetMode = cueMode === "PURPOSE";
   const specialized = cueMode === "INTRO_OUTRO";
   const [introOutro, setIntroOutro] = useState(loadIntroOutro);
-  const specializedVocal = specialized && introOutro.targets.includes("VOCAL_START");
+  const specializedVocal = specialized && introOutro.targets.some((target) => ["VOCAL_START", "VOCAL_END"].includes(target));
   useEffect(() => { try { localStorage.setItem(INTRO_OUTRO_KEY, JSON.stringify(introOutro)); } catch { /* Optional preferences. */ } }, [introOutro]);
-  const [cueTargets, setCueTargets] = useState<CueTarget[]>(CUE_TARGETS.map((target) => target.value));
+  const [cueTargets, setCueTargets] = useState<CueTarget[]>(CUE_TARGETS.filter((target) => target.value !== "VOCAL_END").map((target) => target.value));
+  const vocalRequested = specializedVocal || targetMode && cueTargets.some((target) => ["VOCAL_START", "VOCAL_END"].includes(target)) || cueMode === "LEGACY" && (legacyVocal || legacyVocalEnd);
+  const vocalEndRequested = specialized ? introOutro.targets.includes("VOCAL_END") : targetMode ? cueTargets.includes("VOCAL_END") : legacyVocalEnd;
   const [cuePreferences, setCuePreferences] = useState(loadCuePreferences);
   const { exportColor } = useCueColors();
   const commonCue: CuePreset = cuePreferences.common ?? { cue_kind: "MEMORY", memory_color: exportColor("MEMORY"), hot_color: exportColor("HOT")! };
@@ -174,7 +180,15 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
     event.preventDefault();
     if (busy) return;
     if (missingTargets) { setError("作りたいCueの位置を1つ以上選んでください。"); return; }
-    if (analysisQuality === "AI" && (specializedVocal || targetMode && cueTargets.includes("VOCAL_START")) && !aiStatus?.vocal_scan) {
+    if (vocalEndRequested && !aiStatus?.vocal_end) {
+      setError("ボーカルの終わりを追加するには、アプリを再起動して更新を反映してください。");
+      return;
+    }
+    if (cueMode === "LEGACY" && legacyVocal && !aiStatus?.legacy_vocal_start) {
+      setError("従来の候補へ歌い始めを追加するには、アプリを再起動して更新を反映してください。");
+      return;
+    }
+    if (analysisQuality === "AI" && vocalRequested && !aiStatus?.vocal_scan) {
       setError("ボーカルの段階解析を利用するにはアプリの再起動が必要です。実行中の解析を終了してから更新を反映してください。");
       return;
     }
@@ -198,9 +212,10 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
       const { job_id } = await api.createJob(
         {
           analysis_source: analysisSource,
-          analysis_quality: analysisQuality === "AI" && (specializedVocal || targetMode && cueTargets.includes("VOCAL_START")) ? "AI" : "STANDARD",
+          analysis_quality: analysisQuality === "AI" && vocalRequested ? "AI" : "STANDARD",
           ai_scope: "VOCAL",
           cue_mode: cueMode,
+          ...(cueMode === "LEGACY" ? { legacy_vocal_start: legacyVocal, legacy_vocal_end: legacyVocalEnd, cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => target === "VOCAL_START" && legacyVocal || target === "VOCAL_END" && legacyVocalEnd)) } : {}),
           ...(specialized ? { intro_outro: introOutro, cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => introOutro.targets.includes(target as CueTarget))) } : {}),
           bpm: batchMode ? null : analysisSource === "REKORDBOX" ? analysis?.bpm ?? null : bpm.trim() ? Number(bpm) : null,
           ...(specialized ? { beats_per_phrase: 4 } : phraseUnit === "beats" ? { beats_per_phrase: Number(barsPerPhrase) * 4 } : { bars_per_phrase: Number(barsPerPhrase) }),
@@ -292,6 +307,22 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
               <button type="button" className={specialized ? "" : "secondary"} aria-pressed={specialized} onClick={() => setCueMode("INTRO_OUTRO")}>イントロアウトロ特化</button>
             </div>
             {specialized && <IntroOutroSettingsPanel value={introOutro} onChange={setIntroOutro} preferences={cuePreferences} onPreferences={setCuePreferences} common={commonCue} />}
+            {cueMode === "LEGACY" && <div className="cue-target-option legacy-vocal-option">
+              <label><input type="checkbox" id="legacy-vocal-start" checked={legacyVocal} onChange={(event) => setLegacyVocal(event.target.checked)} /><span>歌い始めも追加する</span></label>
+              <p className="field-help">Intro End・Break・Build・Drop・Outroの候補と一緒に歌い始めを探します。AI補助ではボーカルの段階解析を使い、未検出なら歌い始めを省略します。歌い始めは最寄りの拍へ合わせます。</p>
+              {legacyVocal && <details className="cue-target-preset"><summary>{cuePreferences.targets.VOCAL_START ? "個別設定" : "共通設定"}：{(cuePreferences.targets.VOCAL_START ?? commonCue).cue_kind === "HOT" ? "Hot Cue" : (cuePreferences.targets.VOCAL_START ?? commonCue).cue_kind === "BOTH" ? "両方" : "Memory Cue"} · 種類・色を変更</summary>
+                <CuePresetFields label="歌い始め" value={cuePreferences.targets.VOCAL_START ?? commonCue} onChange={(value) => setCuePreferences((previous) => ({ ...previous, targets: { ...previous.targets, VOCAL_START: value } }))} />
+                {cuePreferences.targets.VOCAL_START && <button type="button" className="secondary tiny" onClick={() => setCuePreferences((previous) => { const targets = { ...previous.targets }; delete targets.VOCAL_START; return { ...previous, targets }; })}>この目的を共通設定に戻す</button>}
+              </details>}
+            </div>}
+            {cueMode === "LEGACY" && <div className="cue-target-option legacy-vocal-end-option">
+              <label><input type="checkbox" id="legacy-vocal-end" checked={legacyVocalEnd} onChange={(event) => setLegacyVocalEnd(event.target.checked)} /><span>ボーカルの終わりも追加する</span></label>
+              <p className="field-help">AI補助で曲末まで確認し、最後の継続する声の終わりを最寄りの拍へ合わせます。途中の歌の休みでは終了しません。特定できない場合は省略します。</p>
+              {legacyVocalEnd && <details className="cue-target-preset"><summary>{cuePreferences.targets.VOCAL_END ? "個別設定" : "共通設定"}：{(cuePreferences.targets.VOCAL_END ?? commonCue).cue_kind === "HOT" ? "Hot Cue" : (cuePreferences.targets.VOCAL_END ?? commonCue).cue_kind === "BOTH" ? "両方" : "Memory Cue"} · 種類・色を変更</summary>
+                <CuePresetFields label="ボーカルの終わり" value={cuePreferences.targets.VOCAL_END ?? commonCue} onChange={(value) => setCuePreferences((previous) => ({ ...previous, targets: { ...previous.targets, VOCAL_END: value } }))} />
+                {cuePreferences.targets.VOCAL_END && <button type="button" className="secondary tiny" onClick={() => setCuePreferences((previous) => { const targets = { ...previous.targets }; delete targets.VOCAL_END; return { ...previous, targets }; })}>この目的を共通設定に戻す</button>}
+              </details>}
+            </div>}
             {targetMode && <>
               <div className="cue-target-options">{CUE_TARGETS.map((target) => <div className="cue-target-option" key={target.value}>
                 <label><input type="checkbox" value={target.value} checked={cueTargets.includes(target.value)} onChange={(e) => setCueTargets((current) => e.target.checked ? [...current, target.value] : current.filter((value) => value !== target.value))} /><span>{target.label}</span></label>
@@ -315,11 +346,12 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
             setAnalysisQuality(next);
             try { localStorage.setItem("aicue.analysisQuality", next); } catch { /* Optional preference. */ }
           }} aria-describedby="analysis-quality-help">
-            <option value="AI" disabled={!aiStatus?.available}>AI補助（ボーカルの開始を検出）</option>
+            <option value="AI" disabled={!aiStatus?.available}>AI補助（ボーカルを検出）</option>
             <option value="STANDARD">通常（フレーズ・音色・和音の変化を照合）</option>
           </select>
-          <p id="analysis-quality-help" className="field-help">{analysisQuality === "AI" ? "歌い始めを選ぶと、PC内で先頭から30秒ずつボーカルを確認します。継続する声を確認できたら残りの分離を省略し、見つからなければ曲末まで調べます。歌い始めが未選択なら音源分離を行いません。拍位置・小節頭は選んだ解析の基準を使います。" : specializedVocal ? "歌い始めは同名LRCの歌詞時刻から探します。歌詞時刻がない場合は省略するため、声を検出するにはAI補助を選んでください。" : "フレーズ情報と音量・音色・和音の変化、離れた区間の繰り返しから候補を評価します。歌い始めはLRC、なければVerseの仮候補です。"}</p>
+          <p id="analysis-quality-help" className="field-help">{analysisQuality === "AI" ? vocalEndRequested ? "PC内で30秒ずつ曲末までボーカルを確認します。最後の声を探すため、歌い始めを検出しても途中で分離を省略しません。拍位置・小節頭は選んだ解析の基準を使います。" : "歌い始めを選ぶと、PC内で先頭から30秒ずつボーカルを確認します。継続する声を確認できたら残りの分離を省略し、見つからなければ曲末まで調べます。ボーカルの項目が未選択なら音源分離を行いません。拍位置・小節頭は選んだ解析の基準を使います。" : specializedVocal ? "歌い始めは同名LRCの歌詞時刻から探します。歌詞時刻がない場合は省略するため、声を検出するにはAI補助を選んでください。ボーカルの終わりは通常解析では省略します。" : "フレーズ情報と音量・音色・和音の変化、離れた区間の繰り返しから候補を評価します。歌い始めはLRC、なければVerseの仮候補です。ボーカルの終わりはAI補助で検出します。"}</p>
           {aiStatus && !aiStatus.available && <p className="field-help">{aiStatus.reason}</p>}
+          {vocalEndRequested && <p className="field-help">ボーカルの終わりにはAI補助が必要です。曲末までの全範囲を調べるため、歌い始めだけの解析より時間がかかります。全曲の分離結果が保存済みなら再利用します。通常解析では終わりを推測せず省略します。</p>}
           </div>
           <div hidden={specialized}>
           <label htmlFor="phrase-length">キュー候補を探す単位</label>
