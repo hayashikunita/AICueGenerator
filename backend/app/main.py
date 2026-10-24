@@ -20,6 +20,8 @@ from .api.routes_ws import router as ws_router
 from .config import get_settings
 from .jobs.manager import JobManager
 from .persistence.db import init_db
+from .persistence.repositories import Repository
+from .rekordbox.metadata import backfill_track_metadata
 from .security import resolve_token
 
 
@@ -27,6 +29,8 @@ from .security import resolve_token
 async def lifespan(app: FastAPI):
     settings = get_settings()
     init_db(settings.db_path)
+    with Repository(settings.db_path) as repo:
+        backfill_track_metadata(repo)
     # 起動ごとに新しいマネージャ（executor）を用意する。
     app.state.manager = JobManager(settings.db_path)
     try:

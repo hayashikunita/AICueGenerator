@@ -53,6 +53,66 @@ def _export(client, job_id):
     return client.post("/api/v1/write/export-xml", headers=_auth(), json={"job_id": job_id})
 
 
+@pytest.mark.parametrize(("duration_ms", "expected"), [(None, 1), (0, 1), (181429, 182)])
+def test_export_includes_total_time_when_track_ref_has_no_duration(cue_job, duration_ms, expected):
+    client, job_id, ids = cue_job
+    _decide(client, ids[0], "BOTH")
+    with Repository(get_settings().db_path) as repo:
+        job_track = repo.list_job_tracks(job_id)[0]
+        track_id = job_track["track_id"]
+        assert repo.get_track(track_id)["duration_ms"] is None
+        repo.set_job_track_analysis(job_id, track_id, {"duration_ms": duration_ms}, repo.get_candidate(ids[0])["run_id"])
+    result = _export(client, job_id)
+    assert result.status_code == 200, result.text
+    track = ET.parse(result.json()["xml_path"]).getroot().find("COLLECTION/TRACK")
+    assert int(track.get("TotalTime")) == expected
+    assert {m.get("Num") for m in track.findall("POSITION_MARK")} == {"-1", "0"}
+    with Repository(get_settings().db_path) as repo:
+        assert repo.get_track(track_id)["duration_ms"] is None
+
+
+def test_unknown_duration_fails_before_creating_another_export(cue_job):
+    from pathlib import Path
+
+    client, job_id, ids = cue_job
+    _decide(client, ids[0], "MEMORY")
+    previous = _export(client, job_id)
+    previous_path = Path(previous.json()["xml_path"])
+    previous_bytes = previous_path.read_bytes()
+    folders = set(previous_path.parent.parent.iterdir())
+    with Repository(get_settings().db_path) as repo:
+        track = repo.get_track(repo.list_job_tracks(job_id)[0]["track_id"])
+        Path(track["path"]).write_bytes(b"invalid audio")
+    result = _export(client, job_id)
+    assert result.status_code == 400, result.text
+    assert "曲の長さ" in result.json()["detail"]
+    assert set(previous_path.parent.parent.iterdir()) == folders
+    assert previous_path.read_bytes() == previous_bytes
+
+
+def test_xml_preserves_rekordbox_title_artist_album_without_renaming_audio(cue_job):
+    from pathlib import Path
+    from urllib.parse import unquote, urlparse
+
+    client, job_id, ids = cue_job
+    _decide(client, ids[0], "BOTH")
+    with Repository(get_settings().db_path) as repo:
+        track = repo.get_track(repo.list_job_tracks(job_id)[0]["track_id"])
+        original_path = Path(track["path"])
+        original_bytes = original_path.read_bytes()
+        repo.set_track_metadata(track["id"], {"title": "Lottery 4.0 (Dirty)", "artist": "Shaggy, Jeremih, Rick Ross, Skillibeng", "album": "Lottery 4.0"})
+    response = _export(client, job_id)
+    assert response.status_code == 200, response.text
+    track_xml = ET.parse(response.json()["xml_path"]).getroot().find("COLLECTION/TRACK")
+    assert track_xml.get("Name") == "Lottery 4.0 (Dirty)"
+    assert track_xml.get("Artist") == "Shaggy, Jeremih, Rick Ross, Skillibeng"
+    assert track_xml.get("Album") == "Lottery 4.0"
+    assert len(track_xml.findall("POSITION_MARK")) == 2
+    copied_name = Path(unquote(urlparse(track_xml.get("Location")).path)).name
+    assert copied_name == original_path.name
+    assert original_path.read_bytes() == original_bytes
+
+
 def test_memory_hot_and_both_persist_and_export_together(cue_job):
     client, job_id, ids = cue_job
     _decide(client, ids[0], "MEMORY")
@@ -156,13 +216,14 @@ def test_kind_colors_export_separately_for_memory_hot_and_both(cue_job):
 @pytest.mark.parametrize("palette", [
     {"MEMORY": "red", "HOT": "#ffffff"}, {"MEMORY": "#123", "HOT": "#ffffff"},
     {"MEMORY": "#123456", "HOT": "#gggggg"}, {"HOT": "#ffffff"},
-    {"MEMORY": None, "HOT": "#ffffff"},
+    {"MEMORY": False, "HOT": "#ffffff"}, {"MEMORY": "#ff0000", "HOT": None},
 ])
 def test_invalid_export_colors_leave_previous_output_untouched(cue_job, palette):
     client, job_id, ids = cue_job
     _decide(client, ids[0], "BOTH")
     response = _export(client, job_id)
-    path = get_settings().export_dir / datetime.now().strftime("%Y%m%d") / "rekordbox.xml"
+    from pathlib import Path
+    path = Path(response.json()["xml_path"])
     previous = path.read_bytes()
     invalid = client.post("/api/v1/write/export-xml", headers=_auth(), json={"job_id": job_id, "cue_colors": palette})
     assert response.status_code == 200 and invalid.status_code == 422
@@ -179,3 +240,21 @@ def test_legacy_export_remains_without_rgb_and_requires_auth(cue_job):
     assert response.json()["cue_colors"] == {} and response.json()["warnings"] == []
     marks = ET.parse(response.json()["xml_path"]).getroot().findall(".//POSITION_MARK")
     assert marks and all("Red" not in mark.attrib for mark in marks)
+
+
+@pytest.mark.parametrize("color", ["#ff66ff", "#ff0000", "#ff9900", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#9900ff", None])
+def test_memory_palette_and_unset_export_without_changing_hot_cues(cue_job, color):
+    client, job_id, ids = cue_job
+    _decide(client, ids[0], "BOTH")
+    response = client.post("/api/v1/write/export-xml", headers=_auth(), json={"job_id": job_id, "cue_colors": {"MEMORY": color, "HOT": "#ffaa00"}})
+    assert response.status_code == 200, response.text
+    assert response.json()["cue_colors"]["MEMORY"] == color
+    marks = ET.parse(response.json()["xml_path"]).getroot().findall(".//POSITION_MARK")
+    memory = next(mark for mark in marks if mark.get("Num") == "-1")
+    hot = next(mark for mark in marks if mark.get("Num") == "0")
+    assert tuple(int(hot.get(key)) for key in ("Red", "Green", "Blue")) == (255, 170, 0)
+    if color is None:
+        assert all(key not in memory.attrib for key in ("Red", "Green", "Blue"))
+        assert response.json()["warnings"] == []
+    else:
+        assert tuple(int(memory.get(key)) for key in ("Red", "Green", "Blue")) == tuple(int(color[offset:offset + 2], 16) for offset in (1, 3, 5))

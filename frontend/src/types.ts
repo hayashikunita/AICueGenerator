@@ -2,7 +2,21 @@
 
 export type Band = "high" | "review" | "reject";
 export type CueKind = "MEMORY" | "HOT" | "BOTH";
-export type CueTarget = "INTRO_START" | "OUTRO" | "CHORUS_START" | "CHORUS_END" | "CHORUS_END_MINUS_8_BARS" | "VOCAL_START";
+export type ExportMode = "COPY" | "EXISTING";
+export interface CollectionXml { source_id: string; filename: string; tracks: number }
+export type CueTarget = "INTRO_START" | "INTRO_END" | "OUTRO" | "OUTRO_END" | "CHORUS_START" | "CHORUS_END" | "CHORUS_END_MINUS_8_BARS" | "VOCAL_START" | "INTRO_BAR" | "INTRO_BAR_X2" | "INTRO_BAR_X3" | "INTRO_INTERVAL" | "INTRO_END_BEFORE" | "OUTRO_INTERVAL" | "OUTRO_END_BEFORE" | "FADE_END" | "FADE_END_BEFORE" | "TRACK_END" | "TRACK_END_BEFORE";
+export type CueMode = "LEGACY" | "PURPOSE" | "INTRO_OUTRO";
+export interface IntroOutroSettings {
+  targets: CueTarget[];
+  intro_position_bars: number;
+  intro_interval_bars: number;
+  intro_before_bars: number;
+  outro_interval_bars: number;
+  outro_before_bars: number;
+  fade_before_bars: number;
+  track_before_bars: number;
+}
+export interface CuePreset { cue_kind: CueKind; memory_color: string | null; hot_color: string }
 export interface CuePosition { time_ms: number; beat: number | null }
 
 export interface Diagnostics {
@@ -15,12 +29,18 @@ export interface Diagnostics {
 }
 
 export interface JobParams {
+  cue_mode?: CueMode;
+  intro_outro?: IntroOutroSettings | null;
   analysis_source?: "REKORDBOX" | "AUDIO";
+  analysis_quality?: "STANDARD" | "AI";
   bpm?: number | null;
   bars_per_phrase?: number;
   beats_per_phrase?: number | null;
   top_k?: number;
   cue_targets?: CueTarget[] | null;
+  cue_default?: CuePreset | null;
+  cue_settings?: Record<string, CuePreset>;
+  end_alignment_bars?: 1 | 4 | 8 | 16;
 }
 
 export interface TrackInput {
@@ -79,6 +99,8 @@ export interface JobSummary {
   created_at: string;
   updated_at: string;
   track_path: string | null;
+  track_title?: string | null;
+  track_artist?: string | null;
   params?: JobParams;
 }
 
@@ -86,6 +108,9 @@ export interface JobTrack {
   id: string;
   content_id: string;
   path: string;
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
   format: string;
   duration_ms: number | null;
   status: string;
@@ -93,6 +118,9 @@ export interface JobTrack {
 }
 
 export interface AnalysisInfo {
+  ai_started_at?: string;
+  ai_progress?: { phase: "WAITING" | "PREPARING" | "SEPARATING" | "FINALIZING" | "CACHED"; percent: number | null; elapsed_sec: number; remaining_sec: number | null };
+  cue_mode?: CueMode;
   source: "REKORDBOX" | "AUDIO";
   available: boolean;
   reason?: string | null;
@@ -105,7 +133,14 @@ export interface AnalysisInfo {
   section_labels_used?: boolean;
   existing_cues?: { time_ms: number; kind: number; comment: string }[];
   warnings?: string[];
+  stage?: string;
+  analysis_quality?: "STANDARD" | "AI";
+  ai_model?: string;
+  ai_cached?: boolean;
+  vocal_start_sec?: number | null;
 }
+
+export interface AiStatus { available: boolean; model: string; local_only: boolean; reason: string | null }
 
 export interface GridPreview {
   content_id: string;
@@ -130,8 +165,11 @@ export interface Evidence {
 }
 
 export interface Candidate {
+  display_label?: string;
+  preset?: CuePreset | null;
   id: string;
   run_id: string;
+  track_id?: string | null;
   type: string;
   time_ms: number;
   original_time_ms?: number | null;
@@ -155,6 +193,9 @@ export interface DecisionRequest {
 }
 
 export interface PlanItem {
+  color?: string | null;
+  end_time_ms?: number | null;
+  preset?: CuePreset | null;
   track_id: string;
   cue_kind: string;
   action: string;
@@ -164,6 +205,12 @@ export interface PlanItem {
 }
 
 export interface WritePlan {
+  mode?: ExportMode;
+  preserved?: number;
+  duplicates_skipped?: number;
+  source_name?: string | null;
+  issues?: string[];
+  track_updates?: { track_id: string; title: string; path: string; existing_memory: number; existing_hot: number; add_memory: number; add_hot: number }[];
   plan_id: string;
   confirmation_hash: string;
   add: number;
@@ -181,13 +228,19 @@ export interface ExecuteResult {
 }
 
 export interface ExportXmlResult {
+  mode?: ExportMode;
+  added_cues?: number;
+  preserved_cues?: number;
+  duplicates_skipped?: number;
+  backup_xml_path?: string | null;
   folder: string;
   xml_path: string;
   tracks: number;
   cues: number;
   copied: number;
   skipped: string[];
-  cue_colors?: Partial<Record<"MEMORY" | "HOT", string>>;
+  cue_colors?: Partial<Record<"MEMORY" | "HOT", string | null>>;
+  cue_settings_used?: boolean;
   warnings?: string[];
 }
 

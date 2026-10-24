@@ -50,6 +50,36 @@ def test_short_chorus_does_not_invent_negative_or_preceding_section_position(phr
     assert candidates == [] and any("8小節より短い" in warning for warning in warnings)
 
 
+@pytest.mark.parametrize("bars_per_end", [1, 4, 8])
+def test_intro_and_outro_ends_count_real_bars_from_first_downbeat(phrased_grid, bars_per_end):
+    grid, feat, sections = phrased_grid
+    candidates, warnings = target_candidates(feat, grid, [], ["INTRO_END", "OUTRO_END"], sections, end_alignment_bars=bars_per_end)
+    assert warnings == []
+    assert [(c.cue_type.value, c.beat_index) for c in candidates] == [("INTRO_END", 34), ("OUTRO_END", 258)]
+    for cue in candidates:
+        assert cue.time_sec == grid.beat_times[cue.beat_index]
+        assert grid.downbeat_indices.index(cue.beat_index) % bars_per_end == 0
+
+
+def test_end_alignment_stays_before_section_end_and_never_invents_grid(phrased_grid):
+    grid, feat, _ = phrased_grid
+    sections = (PhraseSection(2, 50, "INTRO"), PhraseSection(226, 500, "OUTRO"))
+    candidates, _ = target_candidates(feat, grid, [], ["INTRO_END", "OUTRO_END"], sections, end_alignment_bars=8)
+    assert [c.beat_index for c in candidates] == [34, 258]
+    assert all(c.beat_index < len(grid.beat_times) for c in candidates)
+    short, warnings = target_candidates(feat, grid, [], ["INTRO_END"], (PhraseSection(2, 18, "INTRO"),), end_alignment_bars=8)
+    assert short == [] and any("イントロの終わり" in warning for warning in warnings)
+
+
+def test_outro_end_ignores_trailing_silence_and_snaps_to_real_grid(phrased_grid):
+    grid, feat, _ = phrased_grid
+    rms = np.ones(260)
+    rms[180:] = 0
+    candidates, _ = target_candidates(replace(feat, rms=rms), grid, [], ["OUTRO_END"], (), end_alignment_bars=8)
+    assert len(candidates) == 1 and candidates[0].beat_index == 162
+    assert "推定" in candidates[0].evidence[0].detail
+
+
 def test_missing_voice_and_chorus_return_reasons_not_zero_second_guesses(phrased_grid):
     grid, feat, _ = phrased_grid
     candidates, warnings = target_candidates(feat, grid, [], ["VOCAL_START", "CHORUS_START", "CHORUS_END"], ())

@@ -46,7 +46,7 @@ export function App() {
     return (
       <div className="app">
         <header className="app-header">
-          <div className="logo">🎛️</div>
+          <div className="logo" aria-hidden="true">CUE</div>
           <div>
             <h1>rekordbox AI Cue Generator</h1>
             <p className="sub">EDM 楽曲を解析し、Drop / Break / Build などのキュー候補を提案します。</p>
@@ -62,10 +62,10 @@ export function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <div className="logo">🎛️</div>
+        <div className="logo" aria-hidden="true">CUE</div>
         <div>
           <h1>rekordbox AI Cue Generator</h1>
-          <p className="sub">EDM 楽曲を解析し、Drop / Break / Build などのキュー候補を提案します。</p>
+          <p className="sub">rekordbox 解析済みグリッド → 候補を試聴 → MEMORY / HOT CUE</p>
         </div>
       </header>
 

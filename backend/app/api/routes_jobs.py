@@ -8,6 +8,8 @@ from ..common import loads
 from ..jobs.manager import JobManager
 from ..persistence.repositories import Repository, row_to_dict
 from ..reporting.export import candidates_to_csv, job_report
+from ..rekordbox.metadata import track_metadata
+from ..analysis.ai import ai_status
 from ..schemas.jobs import (
     CandidateListResponse,
     CandidateOut,
@@ -38,11 +40,18 @@ def _report_candidate(row) -> dict:
 
 @router.post("/jobs", response_model=CreateJobResponse, status_code=201)
 def create_job(req: CreateJobRequest, manager: JobManager = Depends(get_manager)) -> CreateJobResponse:
+    if req.params.analysis_quality == "AI" and not ai_status()["available"]:
+        raise HTTPException(status_code=400, detail="AI解析環境が未準備です。通常解析を選ぶか、AI環境を準備してください。")
     job_id = manager.submit(
         params=req.params.model_dump(),
         tracks=[t.model_dump() for t in req.tracks],
     )
     return CreateJobResponse(job_id=job_id)
+
+
+@router.get("/analysis/ai-status")
+def analysis_ai_status() -> dict:
+    return ai_status()
 
 
 @router.get("/jobs", response_model=JobListResponse)
@@ -59,7 +68,9 @@ def get_job(job_id: str, repo: Repository = Depends(get_repo)) -> JobSummary:
 
 
 def _job_summary(row) -> JobSummary:
-    return JobSummary(**dict(row), params=JobParams(**(loads(row["params_json"]) or {})))
+    metadata = loads(row["track_metadata_json"]) if row["track_metadata_json"] else {}
+    return JobSummary(**dict(row), track_title=metadata.get("title"), track_artist=metadata.get("artist"),
+                      params=JobParams(**(loads(row["params_json"]) or {})))
 
 
 @router.post("/jobs/{job_id}/cancel", status_code=202)
@@ -81,6 +92,7 @@ def job_tracks(job_id: str, repo: Repository = Depends(get_repo)) -> JobTrackLis
                 id=tr["id"],
                 content_id=tr["content_id"],
                 path=tr["path"],
+                **{key: track_metadata(tr).get(key) for key in ("title", "artist", "album")},
                 format=tr["format"],
                 duration_ms=tr["duration_ms"],
                 status=jt["status"],

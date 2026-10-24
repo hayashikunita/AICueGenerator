@@ -15,6 +15,8 @@ from ..domain.models import CueCandidate
 from .features import BeatFeatures
 from .phrases import PhraseGrid
 from .scoring import score_candidate
+from .structure_evidence import repeated_section_scores
+from .activity import activity_bounds
 
 _EPS = 1e-9
 
@@ -116,6 +118,7 @@ def generate_candidates(
     top_k: int = 3,
     pssi_types: dict[CueType, set[int]] | None = None,
     pssi_at_bar: dict[int, int] | None = None,
+    cue_types: tuple[CueType, ...] | None = None,
 ) -> list[CueCandidate]:
     """種類別 Top-k 候補を生成する。
 
@@ -129,6 +132,8 @@ def generate_candidates(
     boundaries = _phrase_boundary_bars(grid, profile)
     beat_times = np.asarray(feat.beat_times, dtype=float)
     w = max(1, window_bars)
+    repetitions = repeated_section_scores(feat, downbeats, window_bars=w)
+    audible = activity_bounds(feat.rms)
 
     # 境界ごとの変化量を集計して正規化スケールを得る。
     d_energy = {b: _window_delta(profile.energy, b, w) for b in boundaries}
@@ -147,9 +152,12 @@ def generate_candidates(
     out: list[CueCandidate] = []
     third = n / 3.0
 
-    for cue in CueType:
+    for cue in cue_types if cue_types is not None else CueType:
         scored: list[tuple[float, int, dict[str, float]]] = []
         for b in boundaries:
+            if b == 0 or (cue in (CueType.INTRO_END, CueType.OUTRO) and
+                          (audible is None or not audible.start_beat < profile.start_beats[b] < audible.end_beat)):
+                continue
             de, dl, do = d_energy[b], d_low[b], d_onset[b]
             energy_up = max(de, 0.0) / max_abs_e
             energy_dn = max(-de, 0.0) / max_abs_e
@@ -160,27 +168,22 @@ def generate_candidates(
                 if not (de > 0 and dl > 0 and b >= third * 0.5):
                     continue
                 comp = {"energy_diff": energy_up, "percussive_onset": onset_up}
-                strength = energy_up + onset_up
             elif cue is CueType.INTRO_END:
                 if not (de > 0 and b <= third):
                     continue
                 comp = {"energy_diff": energy_up, "percussive_onset": onset_up}
-                strength = energy_up
             elif cue is CueType.BREAK:
                 if not (de < 0 and dl < 0 and third * 0.5 <= b <= third * 2.5):
                     continue
                 comp = {"energy_diff": energy_dn, "percussive_onset": onset_up * 0.5}
-                strength = energy_dn
             elif cue is CueType.BUILD:
                 if not (rise[b] > 0 and b >= third * 0.5):
                     continue
                 comp = {"energy_diff": rise_up, "percussive_onset": onset_up}
-                strength = rise_up + onset_up
             elif cue is CueType.OUTRO:
                 if not (de < 0 and b >= third * 2.0):
                     continue
                 comp = {"energy_diff": energy_dn, "percussive_onset": 0.0}
-                strength = energy_dn
             else:  # pragma: no cover - 種別網羅
                 continue
 
@@ -189,9 +192,11 @@ def generate_candidates(
                 "phrase_alignment": 1.0,
                 "energy_diff": comp.get("energy_diff", 0.0),
                 "percussive_onset": comp.get("percussive_onset", 0.0),
-                "repetition": _repetition(profile.energy, b, w),
+                "repetition": float(repetitions[b]),
             }
-            scored.append((strength, b, components))
+            # Rank with the same evidence that is shown to the user.
+            score, _ = score_candidate(components, pssi_bonus=pssi_bonus(cue, b))
+            scored.append((score, b, components))
 
         scored.sort(key=lambda t: t[0], reverse=True)
         for rank, (_, b, components) in enumerate(scored[:top_k], start=1):
@@ -201,12 +206,3 @@ def generate_candidates(
                 )
             )
     return out
-
-
-def _repetition(energy: np.ndarray, bar: int, w: int) -> float:
-    """境界近傍の局所的一貫性を 0..1 で近似（分散が小さいほど高い）。"""
-    seg = energy[max(0, bar - w) : bar + w]
-    if seg.size < 2:
-        return 0.0
-    var = float(np.var(seg))
-    return float(np.clip(1.0 - var * 4.0, 0.0, 1.0))

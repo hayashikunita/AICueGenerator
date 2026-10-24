@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
-import { CUE_TARGETS } from "../cueTargets";
+import { ALL_CUE_TARGETS as CUE_TARGETS } from "../cueTargets";
 import type { CueTarget } from "../types";
 
 export function ManualCueForm({ jobId, trackId, currentTimeMs, onAdded, disabled, onBusy }: {

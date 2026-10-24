@@ -9,11 +9,15 @@ import numpy as np
 
 from ..domain.enums import BeatSource, CueType
 from ..domain.models import AnalysisResult, BeatGrid, PhraseSection
+from ..domain.cue_targets import INTRO_OUTRO_DEFAULT_TARGETS
 from .cue_targets import lyric_start, target_candidates
 from .beatgrid import BeatGridArrays, beat_stability, estimate_beatgrid, uniform_beatgrid
 from .features import extract_features
 from .phrases import PhraseGrid, best_phase_grid, phrase_grids
 from .structure import generate_candidates
+from .structure_evidence import boundary_strengths, repeated_section_scores
+from .vocals import vocal_start_from_stems
+from .intro_outro import intro_outro_candidates
 
 # PSSI フレーズ型 → Cue 種別の対応（整合時に加点）。型番号は仮置きで P0 S8 後に確定。
 DEFAULT_PSSI_MAP: dict[CueType, set[int]] = {
@@ -37,7 +41,11 @@ def analyze_waveform(
     phrase_boundaries: tuple[int, ...] = (),
     phrase_sections: tuple[PhraseSection, ...] = (),
     cue_targets: list[str] | None = None,
+    end_alignment_bars: int = 1,
     vocal_start: float | None = None,
+    vocal_start_source: str = "LRC",
+    stem_analysis: dict | None = None,
+    intro_outro: dict | None = None,
     fingerprint: str = "n/a",
     top_k: int = 3,
 ) -> AnalysisResult:
@@ -48,6 +56,8 @@ def analyze_waveform(
         if beats_per_phrase <= 0 or beats_per_phrase % beats_per_bar:
             raise ValueError("解析単位の拍数は 1 小節の拍数の倍数にしてください")
         bars_per_phrase = beats_per_phrase // beats_per_bar
+    if intro_outro is not None:
+        bars_per_phrase = 1  # Scan saved bars; the other tabs' phrase setting is unrelated.
     y = np.asarray(y, dtype=float)
     duration = len(y) / sr if sr else 0.0
     warnings: list[str] = []
@@ -74,10 +84,15 @@ def analyze_waveform(
             grid = uniform_beatgrid(128.0, duration, beats_per_bar=beats_per_bar)
 
     feat = extract_features(y, sr, grid.beat_times)
+    if stem_analysis is not None:
+        frame_times = np.arange(len(stem_analysis["mix"])) * stem_analysis["hop_sec"]
+        vocal = np.asarray(stem_analysis["stems"]["vocals"])
+        mix = np.asarray(stem_analysis["mix"])
+        feat.vocal_ratio = np.interp(grid.beat_times, frame_times, np.clip(vocal / np.maximum(mix, 1e-8), 0, 1))
     stability = beat_stability(grid.beat_times)
 
     downbeats = grid.downbeat_indices
-    pgrid = best_phase_grid(downbeats, feat.onset, bars_per_phrase=bars_per_phrase)
+    pgrid = best_phase_grid(downbeats, boundary_strengths(feat, downbeats), bars_per_phrase=bars_per_phrase)
     if pgrid is None:
         grids = phrase_grids(downbeats, bars_options=(bars_per_phrase,))
         pgrid = grids[0] if grids else PhraseGrid(bars_per_phrase, 0, np.asarray([], dtype=int))
@@ -99,10 +114,17 @@ def analyze_waveform(
         pgrid,
         beat_stability=stability,
         top_k=top_k,
+        cue_types=(CueType.INTRO_END, CueType.OUTRO) if intro_outro is not None else None,
     )
-    if cue_targets is not None:
+    if intro_outro is not None:
+        candidates, target_warnings = intro_outro_candidates(feat, grid.to_domain(), candidates, phrase_sections, intro_outro, duration,
+            vocal_start=vocal_start, vocal_start_source=vocal_start_source)
+        warnings.extend(target_warnings)
+    elif cue_targets is not None:
         candidates, target_warnings = target_candidates(feat, grid.to_domain(), candidates, cue_targets,
-                                                        phrase_sections, top_k=top_k, vocal_start=vocal_start)
+                                                        phrase_sections, top_k=top_k, vocal_start=vocal_start,
+                                                        vocal_start_source=vocal_start_source, end_alignment_bars=end_alignment_bars,
+                                                        repetition_scores=repeated_section_scores(feat, downbeats))
         warnings.extend(target_warnings)
     candidates.sort(key=lambda c: (c.cue_type.value, c.rank))
 
@@ -120,6 +142,9 @@ def analyze_file(
     beats_per_phrase: int | None = None, top_k: int = 3,
     beatgrid: BeatGrid | None = None, phrase_boundaries: tuple[int, ...] = (),
     phrase_sections: tuple[PhraseSection, ...] = (), cue_targets: list[str] | None = None,
+    end_alignment_bars: int = 1,
+    stem_analysis: dict | None = None,
+    intro_outro: dict | None = None,
 ) -> AnalysisResult:
     """音源ファイルをデコードして解析する（soundfile/librosa 必須）。"""
     from .decode import decode_mono
@@ -128,6 +153,10 @@ def analyze_file(
     import hashlib
 
     decoded = decode_mono(path)
+    if intro_outro is not None:
+        cue_targets = ["VOCAL_START"] if "VOCAL_START" in intro_outro.get("targets", INTRO_OUTRO_DEFAULT_TARGETS) else None
+        if not cue_targets:
+            stem_analysis = None
     fp = audio_fingerprint(path)
     vocal_start = None
     lyric_warnings = []
@@ -144,6 +173,15 @@ def analyze_file(
         except OSError:
             lyric_warnings.append("同名LRCを読み込めませんでした。")
         fp = "sha256:" + hashlib.sha256(fp.encode() + hashlib.sha256(payload).digest()).hexdigest()
+    vocal_source = "LRC"
+    if vocal_start is None and stem_analysis is not None and cue_targets and "VOCAL_START" in cue_targets:
+        vocal_start = vocal_start_from_stems(stem_analysis)
+        vocal_source = "DEMUCS"
+        if vocal_start is None:
+            lyric_warnings.append("分離したボーカルから継続する開始位置を特定できませんでした。" + ("歌い始めの候補は省略します。" if intro_outro is not None else "Verse先頭がある場合は仮候補として表示します。"))
+    if stem_analysis is not None:
+        import json
+        fp = "sha256:" + hashlib.sha256(fp.encode() + json.dumps(stem_analysis, sort_keys=True).encode()).hexdigest()
     result = analyze_waveform(
         decoded.y,
         decoded.sr,
@@ -154,7 +192,11 @@ def analyze_file(
         phrase_boundaries=phrase_boundaries,
         phrase_sections=phrase_sections,
         cue_targets=cue_targets,
+        end_alignment_bars=end_alignment_bars,
         vocal_start=vocal_start,
+        vocal_start_source=vocal_source,
+        stem_analysis=stem_analysis,
+        intro_outro=intro_outro,
         top_k=top_k,
         fingerprint=fp,
     )

@@ -14,7 +14,11 @@ from ..rekordbox.writer import (
 )
 from ..domain.enums import WriteAction
 from ..domain.cue_kinds import expand_cue_kind
+from ..domain.cue_presets import cue_preset
+from ..common import loads
 from ..rekordbox.xml_export import export_rekordbox_xml
+from ..rekordbox.cue_selection import select_export_cues
+from ..rekordbox.existing_export import prepare_existing, export_existing, save_source, source_info
 from ..schemas.jobs import (
     BuildPlanRequest,
     ExecutePlanRequest,
@@ -23,17 +27,55 @@ from ..schemas.jobs import (
     ExportXmlResponse,
     PlanItemOut,
     WritePlanResponse,
+    CollectionXmlRequest,
+    CollectionXmlResponse,
 )
 from .deps import get_repo, require_token
 
 router = APIRouter(prefix="/api/v1", tags=["write"], dependencies=[Depends(require_token)])
 
 
+@router.post("/write/source-xml", response_model=CollectionXmlResponse)
+def upload_collection(req: CollectionXmlRequest, repo: Repository = Depends(get_repo)) -> CollectionXmlResponse:
+    try:
+        info = save_source(req.xml_text.encode("utf-8"), req.filename, get_settings().data_dir / "import-sources")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    repo.add_audit(actor="user", action="collection_xml", result="ok", target=info["source_id"], after={"tracks": info["tracks"]})
+    return CollectionXmlResponse(**info)
+
+
+@router.get("/write/source-xml/{source_id}", response_model=CollectionXmlResponse)
+def get_collection(source_id: str) -> CollectionXmlResponse:
+    try:
+        info, _ = source_info(source_id, get_settings().data_dir / "import-sources")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return CollectionXmlResponse(**info)
+
+
 @router.post("/write/plan", response_model=WritePlanResponse)
 def build_plan(req: BuildPlanRequest, repo: Repository = Depends(get_repo)) -> WritePlanResponse:
-    if repo.get_job(req.job_id) is None:
+    job = repo.get_job(req.job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    rows = repo.list_accepted_decisions_for_job(req.job_id)
+    params = loads(job["params_json"]) or {}
+    if req.mode == "EXISTING":
+        if not req.source_id:
+            raise HTTPException(status_code=400, detail="rekordboxから書き出した最新のコレクションXMLを選んでください。")
+        try:
+            prepared = prepare_existing(repo, req.job_id, source_id=req.source_id, source_dir=get_settings().data_dir / "import-sources",
+                memory_candidate_ids=req.memory_candidate_ids, cue_colors=req.cue_colors.model_dump() if req.cue_colors else None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        prepared["plan_id"] = repo.create_write_plan(job_id=req.job_id, confirmation_hash=prepared["confirmation_hash"])
+        repo.add_audit(actor="user", action="preview_existing_xml", result="ok", job_id=req.job_id,
+                       target=prepared["plan_id"], after={"add": prepared["add"], "preserved": prepared["preserved"], "conflict": prepared["conflict"]})
+        return WritePlanResponse(**{key: value for key, value in prepared.items() if not key.startswith("_")})
+    try:
+        rows = select_export_cues(repo.list_accepted_decisions_for_job(req.job_id), req.memory_candidate_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     decisions = []
     for r in rows:
         d = dict(r)
@@ -42,6 +84,7 @@ def build_plan(req: BuildPlanRequest, repo: Repository = Depends(get_repo)) -> W
             decisions.append(
                 {
                     "track_id": d["track_id"],
+                    "cue_type": d["cue_type"],
                     "cue_kind": kind,
                     "time_ms": int(time_ms),
                     "slot": d["slot"] if kind == "HOT" else None,
@@ -74,6 +117,7 @@ def build_plan(req: BuildPlanRequest, repo: Repository = Depends(get_repo)) -> W
         conflict=plan.conflict_count,
         items=[
             PlanItemOut(
+                preset=cue_preset(params, decisions[index]["cue_type"]),
                 track_id=i.track_id,
                 cue_kind=i.cue_kind,
                 action=i.action.value,
@@ -81,7 +125,7 @@ def build_plan(req: BuildPlanRequest, repo: Repository = Depends(get_repo)) -> W
                 slot=i.slot,
                 reason=i.reason,
             )
-            for i in plan.items
+            for index, i in enumerate(plan.items)
         ],
     )
 
@@ -133,8 +177,15 @@ def export_xml(req: ExportXmlRequest, repo: Repository = Depends(get_repo)) -> E
     if repo.get_job(req.job_id) is None:
         raise HTTPException(status_code=404, detail="job not found")
     try:
-        result = export_rekordbox_xml(repo, req.job_id, export_root=get_settings().export_dir,
-                                     cue_colors=req.cue_colors.model_dump() if req.cue_colors else None)
+        colors = req.cue_colors.model_dump() if req.cue_colors else None
+        if req.mode == "EXISTING":
+            if not req.source_id or not req.confirmation_hash:
+                raise ValueError("コレクションXMLを選び、追加内容を確認してから書き出してください。")
+            prepared = prepare_existing(repo, req.job_id, source_id=req.source_id, source_dir=get_settings().data_dir / "import-sources",
+                memory_candidate_ids=req.memory_candidate_ids, cue_colors=colors)
+            result = export_existing(prepared, get_settings().export_dir, confirmation_hash=req.confirmation_hash, cue_colors=colors)
+        else:
+            result = export_rekordbox_xml(repo, req.job_id, export_root=get_settings().export_dir, cue_colors=colors, memory_candidate_ids=req.memory_candidate_ids)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result["tracks"] == 0:
@@ -145,7 +196,7 @@ def export_xml(req: ExportXmlRequest, repo: Repository = Depends(get_repo)) -> E
         result="ok",
         target=result["folder"],
         job_id=req.job_id,
-        after={"tracks": result["tracks"], "cues": result["cues"], "copied": result["copied"], "cue_colors": result["cue_colors"]},
+        after={"tracks": result["tracks"], "cues": result["cues"], "copied": result["copied"], "cue_colors": result["cue_colors"], "memory_candidate_ids": req.memory_candidate_ids, "mode": req.mode, "source_id": req.source_id},
     )
     return ExportXmlResponse(**result)
 

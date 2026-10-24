@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common import dumps, loads, new_id, utcnow_iso
+from ..domain.cue_presets import preferred_kind
 from .db import connect
 
 
@@ -43,7 +44,7 @@ class Repository:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         row = self._conn.execute(
-            "SELECT id FROM track_ref WHERE content_id = ?", (content_id,)
+            "SELECT id, path, metadata_json FROM track_ref WHERE content_id = ?", (content_id,)
         ).fetchone()
         if row:
             self._conn.execute(
@@ -56,7 +57,7 @@ class Repository:
                     sample_rate,
                     rb_uuid,
                     int(writable),
-                    dumps(metadata) if metadata else None,
+                    dumps(metadata) if metadata else row["metadata_json"] if row["path"] == path else None,
                     content_id,
                 ),
             )
@@ -86,6 +87,13 @@ class Repository:
         return self._conn.execute(
             "SELECT * FROM track_ref WHERE id = ?", (track_id,)
         ).fetchone()
+
+    def list_tracks_missing_metadata(self) -> list[sqlite3.Row]:
+        return self._conn.execute("SELECT * FROM track_ref WHERE metadata_json IS NULL").fetchall()
+
+    def set_track_metadata(self, track_id: str, metadata: dict[str, Any]) -> None:
+        self._conn.execute("UPDATE track_ref SET metadata_json=? WHERE id=?", (dumps(metadata), track_id))
+        self._conn.commit()
 
     # --- analysis_job ------------------------------------------------------
     def create_job(self, *, params: dict[str, Any], track_ids: list[str]) -> str:
@@ -130,14 +138,18 @@ class Repository:
     def get_job(self, job_id: str) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT j.*, (SELECT t.path FROM job_track jt JOIN track_ref t ON t.id=jt.track_id "
-            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_path "
+            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_path, "
+            "(SELECT t.metadata_json FROM job_track jt JOIN track_ref t ON t.id=jt.track_id "
+            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_metadata_json "
             "FROM analysis_job j WHERE j.id = ?", (job_id,)
         ).fetchone()
 
     def list_jobs(self, limit: int = 100) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT j.*, (SELECT t.path FROM job_track jt JOIN track_ref t ON t.id=jt.track_id "
-            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_path "
+            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_path, "
+            "(SELECT t.metadata_json FROM job_track jt JOIN track_ref t ON t.id=jt.track_id "
+            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_metadata_json "
             "FROM analysis_job j ORDER BY j.created_at DESC LIMIT ?", (limit,)
         ).fetchall()
 
@@ -279,15 +291,17 @@ class Repository:
 
     def get_candidate(self, candidate_id: str) -> sqlite3.Row | None:
         return self._conn.execute(
-            "SELECT c.*, d.accepted, d.cue_kind,d.edited_time_ms,d.slot,d.color,d.comment,fs.beat_times_json FROM cue_candidate c "
+            "SELECT c.*, r.track_id, d.accepted, d.cue_kind,d.edited_time_ms,d.slot,d.color,d.comment,fs.beat_times_json FROM cue_candidate c "
+            "JOIN analysis_run r ON r.id=c.run_id "
             "LEFT JOIN cue_decision d ON d.candidate_id=c.id LEFT JOIN feature_summary fs ON fs.run_id=c.run_id WHERE c.id = ?", (candidate_id,)
         ).fetchone()
 
     def list_candidates_for_job(self, job_id: str) -> list[sqlite3.Row]:
         return self._conn.execute(
-            "SELECT c.*, d.accepted, d.cue_kind,d.edited_time_ms,fs.beat_times_json FROM cue_candidate c "
+            "SELECT c.*, r.track_id, tr.content_id AS track_content_id, d.accepted, d.cue_kind,d.edited_time_ms,fs.beat_times_json FROM cue_candidate c "
             "LEFT JOIN cue_decision d ON d.candidate_id=c.id "
             "JOIN analysis_run r ON c.run_id = r.id "
+            "JOIN track_ref tr ON tr.id=r.track_id "
             "LEFT JOIN feature_summary fs ON fs.run_id=r.id "
             "JOIN job_track jt ON jt.track_id = r.track_id "
             "JOIN analysis_job j ON jt.job_id = j.id "
@@ -302,6 +316,34 @@ class Repository:
         ).fetchall()
 
     # --- cue_decision ------------------------------------------------------
+    def accept_candidates(self, job_id: str, candidate_ids: list[str], cue_kind: str) -> None:
+        """Apply an explicitly reviewed selection atomically to the app database."""
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            job = self.get_job(job_id)
+            if job is None or job["status"] not in {"COMPLETED", "CANCELLED", "FAILED"}:
+                raise ValueError("解析が終了してから一括採用してください。")
+            rows = self.list_candidates_for_job(job_id)
+            selected = set(candidate_ids)
+            if len(selected) != len(candidate_ids) or not selected.issubset({r["id"] for r in rows}):
+                raise ValueError("候補が変更されています。結果を再取得して選び直してください。")
+            params = loads(job["params_json"]) or {}
+            chosen = {row["id"]: preferred_kind(params, row["type"]) if cue_kind == "PRESET" else cue_kind for row in rows if row["id"] in selected}
+            hot_counts: dict[str, int] = {}
+            for row in rows:
+                kind = chosen[row["id"]] if row["id"] in selected else row["cue_kind"] if row["accepted"] else None
+                if kind in {"HOT", "BOTH"}:
+                    tid = row["track_id"]
+                    hot_counts[tid] = hot_counts.get(tid, 0) + 1
+            if any(count > 8 for count in hot_counts.values()):
+                raise ValueError("Hot Cue は1曲につき8件までです。対象を減らすか Memory Cue を選んでください。")
+            now = utcnow_iso()
+            self._conn.executemany(
+                "INSERT INTO cue_decision (id,candidate_id,accepted,cue_kind,updated_at) VALUES (?,?,1,?,?) "
+                "ON CONFLICT(candidate_id) DO UPDATE SET accepted=1,cue_kind=excluded.cue_kind,updated_at=excluded.updated_at",
+                [(new_id(), cid, chosen[cid], now) for cid in candidate_ids],
+            )
+
     def upsert_decision(
         self,
         *,
@@ -336,7 +378,7 @@ class Repository:
 
     def list_accepted_decisions_for_job(self, job_id: str) -> list[sqlite3.Row]:
         return self._conn.execute(
-            "SELECT d.*, c.type AS cue_type, c.time_ms AS orig_time_ms, r.track_id AS track_id "
+            "SELECT d.*, c.type AS cue_type, c.time_ms AS orig_time_ms, c.confidence, c.rank, r.track_id AS track_id "
             "FROM cue_decision d "
             "JOIN cue_candidate c ON d.candidate_id = c.id "
             "JOIN analysis_run r ON c.run_id = r.id "

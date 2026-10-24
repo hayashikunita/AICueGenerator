@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from ..analysis.pipeline import analyze_file
-from ..common import ENGINE_VERSION, dumps
+from ..analysis.ai import analyze_stems, AnalysisCancelled
+from ..analysis.vocals import vocal_start_from_stems
+from ..common import ENGINE_VERSION, dumps, utcnow_iso
 from ..config import get_settings
 from ..domain.enums import BeatSource
 from ..domain.models import BeatGrid, PhraseSection
@@ -59,8 +61,12 @@ def run_job(
                 hub.publish(job_id, EventType.JOB_CANCELLED, {})
                 return
             track_id = str(jt["track_id"])
-            _process_track(repo, hub, job_id, track_id, params)
+            _process_track(repo, hub, job_id, track_id, params, cancel_event=cancel_event)
 
+        if cancel_event.is_set():
+            repo.set_job_status(job_id, "CANCELLED")
+            hub.publish(job_id, EventType.JOB_CANCELLED, {})
+            return
         repo.set_job_status(job_id, "COMPLETED")
         job = repo.get_job(job_id)
         hub.publish(
@@ -88,6 +94,7 @@ def _process_track(
     job_id: str,
     track_id: str,
     params: dict[str, Any],
+    *, cancel_event=None,
 ) -> None:
     track = repo.get_track(track_id)
     if track is None:
@@ -131,14 +138,46 @@ def _process_track(
             analysis["section_labels_used"] = bool(params.get("cue_targets") and any(s.kind != "UNKNOWN" for s in phrase_sections))
             analysis["phrase_used"] = bool(phrase_boundaries)
             repo.set_job_track_analysis(job_id, track_id, analysis)
+        stems = None
+        specialized = params.get("cue_mode") == "INTRO_OUTRO"
+        vocal_requested = "VOCAL_START" in (params.get("intro_outro") or {}).get("targets", [])
+        if params.get("analysis_quality") == "AI" and (not specialized or vocal_requested):
+            analysis.update(available=False, analysis_quality="AI", ai_started_at=utcnow_iso(), stage="AI音源分離を準備しています…")
+            repo.set_job_track_analysis(job_id, track_id, analysis)
+
+            def progress_changed(progress):
+                phase = progress["phase"]
+                message = {"WAITING": "ほかの曲のAI音源分離が終わるのを待っています。", "PREPARING": "AIモデル・音源を読み込んでいます。", "SEPARATING": "AIで音源を分離しています。", "FINALIZING": "音源分離の結果を整理しています。", "CACHED": "保存済みの音源分離結果を利用します。"}[phase]
+                analysis.update(ai_progress=progress, stage=message)
+                repo.set_job_track_analysis(job_id, track_id, analysis)
+                hub.publish(job_id, EventType.JOB_PROGRESS, {"track_id": track_id, "ai_progress": progress})
+
+            stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed)
+            if source == "REKORDBOX":
+                with open_rekordbox(path=settings.rekordbox_db_path, key=settings.rekordbox_key) as db:
+                    latest_snapshot = load_track_analysis(db, str(track["content_id"]), path)
+                if hashlib.sha256(dumps(latest_snapshot).encode("utf-8")).hexdigest() != source_fingerprint:
+                    raise ValueError("AI処理中にrekordboxのグリッド・フレーズ・Cue情報が変わりました。解析情報を再取得して実行し直してください。")
+            analysis.update(ai_model=stems["model"], ai_cached=cached_stems,
+                            vocal_start_sec=vocal_start_from_stems(stems), stage="音色・和音・ボーカルとフレーズを照合しています…")
+            repo.set_job_track_analysis(job_id, track_id, analysis)
         result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, beats_per_phrase=beats_per_phrase, top_k=top_k, beatgrid=grid, phrase_boundaries=phrase_boundaries,
-                              phrase_sections=phrase_sections, cue_targets=params.get("cue_targets"))
+                              phrase_sections=phrase_sections, cue_targets=params.get("cue_targets"), end_alignment_bars=params.get("end_alignment_bars", 1),
+                              stem_analysis=stems, intro_outro=(params.get("intro_outro") or {}) if specialized else None)
+        if specialized:
+            analysis.update(cue_mode="INTRO_OUTRO", analysis_quality="AI" if stems is not None else "STANDARD", section_labels_used=any(s.kind in {"INTRO", "OUTRO"} for s in phrase_sections))
+        analysis.pop("stage", None)
         fingerprint = result.fingerprint
         if source_fingerprint:
             fingerprint = "sha256:" + hashlib.sha256((fingerprint + source_fingerprint).encode("ascii")).hexdigest()
         analysis.update(available=True, bpm=result.beatgrid.bpm, beat_source=result.beatgrid.source.value,
                         beat_count=result.beatgrid.beat_count, downbeat_count=len(result.beatgrid.downbeat_indices), duration_ms=round(result.duration_sec * 1000))
         analysis["warnings"] = list(analysis.get("warnings", [])) + list(result.warnings)
+    except AnalysisCancelled:
+        analysis.update(available=False, stage="キャンセルしました")
+        repo.set_job_track_analysis(job_id, track_id, analysis)
+        repo.set_job_track_status(job_id, track_id, "CANCELLED")
+        return
     except Exception as exc:  # noqa: BLE001 - 曲単位失敗は継続
         analysis.update(available=False, reason=str(exc))
         repo.set_job_track_analysis(job_id, track_id, analysis)

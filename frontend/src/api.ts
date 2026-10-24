@@ -1,6 +1,9 @@
 import type {
   Candidate,
+  CollectionXml,
+  ExportMode,
   AnalysisInfo,
+  AiStatus,
   GridPreview,
   GridPlan,
   CuePosition,
@@ -60,6 +63,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   diagnostics: () => req<Diagnostics>("/diagnostics"),
+  aiStatus: () => req<AiStatus>("/analysis/ai-status"),
 
   createJob: (params: JobParams, tracks: TrackInput[]) =>
     req<{ job_id: string }>("/jobs", {
@@ -116,13 +120,19 @@ export const api = {
   previewPosition: (candidateId: string, timeMs: number, snapTo: "BEAT" | "BAR", step = 0) =>
     req<CuePosition>(`/candidates/${encodeURIComponent(candidateId)}/preview-position`, { method: "POST", body: JSON.stringify({ time_ms: timeMs, snap_to: snapTo, step }) }),
 
+  acceptCandidates: (jobId: string, candidateIds: string[], cueKind: "MEMORY" | "HOT" | "BOTH" | "PRESET") =>
+    req<{ candidates: Candidate[] }>(`/jobs/${encodeURIComponent(jobId)}/candidates/accept`, { method: "POST", body: JSON.stringify({ candidate_ids: candidateIds, cue_kind: cueKind }) }),
+
   addManualCandidate: (jobId: string, trackId: string, target: CueTarget, timeMs: number, snapTo: "BEAT" | "BAR") =>
     req<Candidate>(`/jobs/${encodeURIComponent(jobId)}/candidates/manual`, { method: "POST", body: JSON.stringify({ track_id: trackId, target, time_ms: timeMs, snap_to: snapTo }) }),
 
-  buildPlan: (jobId: string) =>
+  uploadCollectionXml: (filename: string, xmlText: string) => req<CollectionXml>("/write/source-xml", { method: "POST", body: JSON.stringify({ filename, xml_text: xmlText }) }),
+  getCollectionXml: (sourceId: string) => req<CollectionXml>(`/write/source-xml/${encodeURIComponent(sourceId)}`),
+
+  buildPlan: (jobId: string, memoryCandidateIds?: string[], options?: { mode: ExportMode; source_id?: string; cue_colors?: { MEMORY: string | null; HOT: string } }) =>
     req<WritePlan>("/write/plan", {
       method: "POST",
-      body: JSON.stringify({ job_id: jobId }),
+      body: JSON.stringify({ job_id: jobId, memory_candidate_ids: memoryCandidateIds, ...options }),
     }),
 
   executePlan: (planId: string, confirmationHash: string) =>
@@ -131,10 +141,10 @@ export const api = {
       body: JSON.stringify({ plan_id: planId, confirmation_hash: confirmationHash }),
     }),
 
-  exportXml: (jobId: string, cueColors: Record<"MEMORY" | "HOT", string>) =>
+  exportXml: (jobId: string, cueColors: { MEMORY: string | null; HOT: string }, memoryCandidateIds?: string[], options?: { mode: ExportMode; source_id?: string; confirmation_hash?: string }) =>
     req<ExportXmlResult>("/write/export-xml", {
       method: "POST",
-      body: JSON.stringify({ job_id: jobId, cue_colors: cueColors }),
+      body: JSON.stringify({ job_id: jobId, cue_colors: cueColors, memory_candidate_ids: memoryCandidateIds, ...options }),
     }),
 
   downloadReport: async (jobId: string) => {

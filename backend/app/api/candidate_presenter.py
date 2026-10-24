@@ -18,7 +18,7 @@ def candidate_out(row) -> CandidateOut:
     times = loads(data.get("beat_times_json")) or []
     if edited is not None and times:
         beat = nearest_index(times, edited / 1000)
-    return CandidateOut(id=data["id"], run_id=data["run_id"], type=data["type"], time_ms=time_ms,
+    return CandidateOut(id=data["id"], run_id=data["run_id"], track_id=data.get("track_id"), type=data["type"], time_ms=time_ms,
                         original_time_ms=data["time_ms"], edited_time_ms=edited, beat=beat,
                         confidence=data["confidence"], rank=data["rank"], band=confidence_band(float(data["confidence"])),
                         evidence=[EvidenceOut(**e) for e in (loads(data.get("evidence_json")) or [])],

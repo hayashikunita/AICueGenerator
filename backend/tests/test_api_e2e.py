@@ -122,7 +122,7 @@ def test_export_xml_creates_dated_library(tmp_path):
         folder = body["folder"]
         # ライブラリは export_dir/yyyymmdd 配下に作られる。
         assert folder.startswith(str(get_settings().export_dir))
-        assert os.path.basename(folder).isdigit() and len(os.path.basename(folder)) == 8
+        assert os.path.basename(os.path.dirname(folder)).isdigit() and len(os.path.basename(os.path.dirname(folder))) == 8
         # 音源が複製されている。
         assert os.path.isfile(os.path.join(folder, "export_song.wav"))
         # rekordbox.xml に POSITION_MARK が含まれる。

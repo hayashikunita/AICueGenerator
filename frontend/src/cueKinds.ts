@@ -2,9 +2,10 @@ import type { CueKind } from "./types";
 
 export const SINGLE_CUE_KINDS = ["MEMORY", "HOT"] as const;
 export type SingleCueKind = typeof SINGLE_CUE_KINDS[number];
+export const CUE_LIMITS = { MEMORY: 10, HOT: 8 } as const;
 
 export const DEFAULT_KIND_COLORS: Record<SingleCueKind, string> = {
-  MEMORY: "#3fb6c9",
+  MEMORY: "#00ffff",
   HOT: "#ff5d73",
 };
 

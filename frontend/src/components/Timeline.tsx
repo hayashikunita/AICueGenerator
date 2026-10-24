@@ -5,6 +5,8 @@ import { useCueColors, useCueMeta } from "./CueColors";
 import { CUE_KIND_LABEL, colorText } from "../cueKinds";
 import { CueKindSwatch } from "./CueKindSwatch";
 import { pauseOtherAudio } from "../audio";
+import { CueDock } from "./CueDock";
+import { presetBackground } from "../cuePresets";
 
 // 音源を Web Audio API でデコードして波形ピークを算出するフック。
 function useWaveform(url: string | null | undefined, buckets = 600) {
@@ -16,17 +18,20 @@ function useWaveform(url: string | null | undefined, buckets = 600) {
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setPeaks(null);
     (async () => {
+      let ctx: AudioContext | null = null;
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: controller.signal });
         if (!res.ok) return;
         const buf = await res.arrayBuffer();
         const Ctx =
           window.AudioContext ||
           (window as unknown as { webkitAudioContext: typeof AudioContext })
             .webkitAudioContext;
-        const ctx = new Ctx();
+        if (cancelled) return;
+        ctx = new Ctx();
         const audio = await ctx.decodeAudioData(buf);
         const ch = audio.getChannelData(0);
         const block = Math.floor(ch.length / buckets) || 1;
@@ -42,14 +47,16 @@ function useWaveform(url: string | null | undefined, buckets = 600) {
           out.push(max);
           if (max > peak) peak = max;
         }
-        void ctx.close();
         if (!cancelled) setPeaks(peak > 0 ? out.map((v) => v / peak) : out);
       } catch {
         if (!cancelled) setPeaks(null);
+      } finally {
+        if (ctx) void ctx.close();
       }
     })();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [url, buckets]);
 
@@ -76,7 +83,7 @@ function Waveform({ peaks }: { peaks: number[] }) {
     ctx.clearRect(0, 0, w, h);
     const mid = h / 2;
     const bw = w / peaks.length;
-    ctx.fillStyle = "rgba(120,150,200,0.28)";
+    ctx.fillStyle = "rgba(25,155,220,0.65)";
     for (let i = 0; i < peaks.length; i++) {
       const bh = Math.max(1, peaks[i] * (h * 0.9));
       ctx.fillRect(i * bw, mid - bh / 2, Math.max(1, bw - 0.5), bh);
@@ -179,6 +186,7 @@ export function Timeline({
 
   return (
     <div className="timeline">
+      <div className="deck-layout"><div className="deck-waveform">
       <div className="cue-kind-legend"><span><CueKindSwatch kind="MEMORY" />Memory Cue</span><span><CueKindSwatch kind="HOT" />Hot Cue</span><span><CueKindSwatch kind="BOTH" />両方</span><span className="muted">採用した候補に反映</span></div>
       {audioUrl && (
         <div className="timeline-transport">
@@ -215,9 +223,10 @@ export function Timeline({
         )}
 
         {candidates.map((c) => {
-          const m = cueMeta(c.type);
+          const m = { ...cueMeta(c.type), label: c.display_label ?? cueMeta(c.type).label };
           const acceptedKind = c.accepted === true ? c.cue_kind ?? "MEMORY" : null;
-          const background = acceptedKind ? kindBackground(acceptedKind) : m.color;
+          const visualKind = acceptedKind ?? c.preset?.cue_kind;
+          const background = visualKind ? presetBackground(c.preset, visualKind, kindBackground) : m.color;
           const left = (c.time_ms / durationMs) * 100;
           const h = 34 + (c.confidence / 100) * 42;
           return (
@@ -228,7 +237,7 @@ export function Timeline({
                 left: `${left}%`,
                 height: `${h}%`,
                 background,
-                color: acceptedKind === "BOTH" ? "#ffffff" : colorText(background),
+                color: visualKind === "BOTH" ? "#ffffff" : colorText(background),
                 boxShadow: acceptedKind ? "0 0 0 1px rgba(255,255,255,.45)" : `0 0 10px ${m.glow}`,
               }}
               onClick={(e) => {
@@ -267,14 +276,15 @@ export function Timeline({
       {hover && (
         <div className="timeline-tip">
           <span className="chip" style={{ background: cueMeta(hover.type).color }}>
-            {cueMeta(hover.type).icon} {cueMeta(hover.type).label}
+            {cueMeta(hover.type).icon} {hover.display_label ?? cueMeta(hover.type).label}
           </span>
           <span className="mono">{fmtTime(hover.time_ms)}</span>
-          {hover.accepted && <span><CueKindSwatch kind={hover.cue_kind ?? "MEMORY"} />{CUE_KIND_LABEL[hover.cue_kind ?? "MEMORY"]}</span>}
+          {hover.accepted && <span><CueKindSwatch kind={hover.cue_kind ?? "MEMORY"} preset={hover.preset} />{CUE_KIND_LABEL[hover.cue_kind ?? "MEMORY"]}</span>}
           <span className="muted">信頼度 {hover.confidence}</span>
           <span className={`badge ${hover.band}`}>{hover.band}</span>
         </div>
       )}
+      </div><CueDock candidates={candidates} onAudition={audioUrl ? playCue : undefined} /></div>
     </div>
   );
 }

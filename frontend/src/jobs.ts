@@ -5,7 +5,8 @@ export function jobStatus(status: string, failed = 0): string {
   return ({ PENDING: "待機中", QUEUED: "待機中", RUNNING: "解析中", COMPLETED: "解析完了", FAILED: "失敗", CANCELLED: "キャンセル済み" } as Record<string, string>)[status] ?? status;
 }
 
-export function trackName(path: string | null | undefined): string {
+export function trackName(path: string | null | undefined, title?: string | null, artist?: string | null): string {
+  if (title?.trim()) return `${title.trim()}${artist?.trim() ? ` · ${artist.trim()}` : ""}`;
   return path?.split(/[\\/]/).pop() || "解析した曲";
 }
 

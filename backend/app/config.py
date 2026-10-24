@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # rekordbox master.db の場所と鍵。未指定なら pyrekordbox が自動検出する。
     rekordbox_db_path: str | None = None
     rekordbox_key: str | None = None
+    ai_python: str | None = None
 
     # API トークン。未指定なら data_dir/token に保存した値を再利用する（起動間で不変）。
     token: str | None = None

@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useState } from "react";
 import { api } from "../api";
 import { fmtTime } from "../cues";
-import type { Candidate, CueKind, CuePosition } from "../types";
+import type { Candidate, CueKind, CuePosition, CuePreset } from "../types";
+import { presetColor, presetBackground } from "../cuePresets";
 import { CUE_KIND_LABEL, colorText } from "../cueKinds";
 import { useCueColors, useCueMeta } from "./CueColors";
 import { CueKindSwatch } from "./CueKindSwatch";
@@ -9,7 +10,7 @@ import { useToast } from "./Toast";
 
 function Evidence({ c }: { c: Candidate }) {
   return (
-    <div style={{ display: "grid", gap: 7, padding: "4px 2px" }}>
+    <div className="candidate-evidence" style={{ display: "grid", gap: 7, padding: "4px 2px" }}>
       {c.evidence.map((e) => {
         const pct = Math.round(e.score * 100);
         const band = pct >= 66 ? "high" : pct >= 40 ? "review" : "reject";
@@ -42,13 +43,19 @@ export function CandidateTable({
   onAudition,
   disabled = false,
   onDraftChange,
+  jobId,
+  trackNames,
+  onBatchChanged,
 }: {
   candidates: Candidate[];
   onChanged: (candidateId: string, accepted: boolean, cueKind: CueKind, position: CuePosition) => void;
   onSavingChange: (delta: number) => void;
-  onAudition?: (timeMs: number) => void;
+  onAudition?: (timeMs: number, trackId?: string | null) => void;
   disabled?: boolean;
   onDraftChange?: (drafting: boolean) => void;
+  jobId?: string;
+  trackNames?: Record<string, string>;
+  onBatchChanged?: (candidates: Candidate[]) => void;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, boolean>>({});
@@ -60,14 +67,24 @@ export function CandidateTable({
   const [snap, setSnap] = useState<"BEAT" | "BAR">("BEAT");
   const [adjusting, setAdjusting] = useState(false);
   const [positionError, setPositionError] = useState("");
+  const [checked, setChecked] = useState<string[]>([]);
+  const [bulkKind, setBulkKind] = useState<CueKind | "PRESET">("PRESET");
+  const [reviewed, setReviewed] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const locked = disabled || bulkBusy;
+  const colCount = 7 + (jobId ? 1 : 0) + (trackNames ? 1 : 0);
+  useEffect(() => {
+    setChecked((previous) => previous.filter((id) => candidates.some((c) => c.id === id)));
+    setReviewed(false);
+  }, [candidates]);
   useEffect(() => { onDraftChange?.(editing !== null || Object.keys(drafts).length > 0); }, [drafts, editing, onDraftChange]);
   const cueMeta = useCueMeta();
-  const { kindColor } = useCueColors();
-  const kindButtonStyle = (kind: "MEMORY" | "HOT") => ({ background: kindColor(kind), color: colorText(kindColor(kind)) });
+  const { kindColor, kindBackground } = useCueColors();
+  const kindButtonStyle = (kind: "MEMORY" | "HOT", preset?: CuePreset | null) => { const color = presetColor(preset, kind, kindColor(kind)); return { background: color, color: colorText(color) }; };
   const toast = useToast();
 
   const decide = async (c: Candidate, accepted: boolean, cueKind: CueKind) => {
-    if (disabled || pending[c.id] || adjusting) return;
+    if (locked || pending[c.id] || adjusting) return;
     setPending((p) => ({ ...p, [c.id]: true }));
     onSavingChange(1);
     try {
@@ -76,7 +93,7 @@ export function CandidateTable({
       setDrafts((current) => { const next = { ...current }; delete next[c.id]; return next; });
       if (editing === c.id) setEditing(null);
       const label = accepted ? `採用 (${CUE_KIND_LABEL[cueKind]})` : "却下";
-      const meta = cueMeta(c.type);
+      const meta = { ...cueMeta(c.type), label: c.display_label ?? cueMeta(c.type).label };
       toast.push(
         accepted ? "success" : "info",
         `${meta.label} ${fmtTime(c.time_ms)} を${label}しました`,
@@ -90,7 +107,7 @@ export function CandidateTable({
   };
 
   const preview = async (candidate: Candidate, step = 0, fromOriginal = false) => {
-    if (disabled || adjusting) return;
+    if (locked || adjusting) return;
     setPositionError("");
     const timeMs = fromOriginal ? candidate.original_time_ms ?? candidate.time_ms : step ? drafts[candidate.id]?.time_ms ?? candidate.time_ms : Math.round(Number(positionInputs[candidate.id] ?? candidate.time_ms / 1000) * 1000);
     if (!Number.isFinite(timeMs) || timeMs < 0 || positionInputs[candidate.id] === "") { setPositionError("曲の範囲内の秒数を入力してください。"); return; }
@@ -117,6 +134,21 @@ export function CandidateTable({
     (filter === "memory" && c.accepted === true && (c.cue_kind === "MEMORY" || c.cue_kind === "BOTH")) ||
     (filter === "hot" && c.accepted === true && (c.cue_kind === "HOT" || c.cue_kind === "BOTH"))
   ));
+  const selected = candidates.filter((c) => checked.includes(c.id));
+  const bulkBlocked = locked || adjusting || editing !== null || Object.keys(drafts).length > 0 || Object.values(pending).some(Boolean);
+  const acceptSelection = async () => {
+    if (!jobId || bulkBlocked || !reviewed || !selected.length) return;
+    setBulkBusy(true);
+    onSavingChange(1);
+    try {
+      const result = await api.acceptCandidates(jobId, selected.map((c) => c.id), bulkKind);
+      onBatchChanged?.(result.candidates);
+      setChecked([]);
+      setReviewed(false);
+      toast.push("success", `${selected.length}候補を ${bulkKind === "PRESET" ? "事前設定どおり" : CUE_KIND_LABEL[bulkKind]} で一括採用しました。`);
+    } catch (error) { toast.push("error", `一括採用できませんでした: ${error}`); }
+    finally { setBulkBusy(false); onSavingChange(-1); }
+  };
 
   return (
     <>
@@ -131,11 +163,22 @@ export function CandidateTable({
       <label htmlFor="cue-type">種別<select id="cue-type" value={type} onChange={(e) => setType(e.target.value)}><option value="all">すべての種別</option>{Array.from(new Set(candidates.map((c) => c.type))).map((t) => <option key={t} value={t}>{cueMeta(t).label}</option>)}</select></label>
       <span className="muted" role="status">{visible.length} / {candidates.length} 件</span>
     </div>
-    <p className="table-scroll-hint field-help">表を横にスクロールすると、判定と採用ボタンを確認できます。</p>
-    <div className="table-scroll" tabIndex={0} role="region" aria-label="キュー候補一覧">
-    <table>
+    <p className="table-scroll-hint candidate-scroll-hint field-help">表を横にスクロールすると、判定と採用ボタンを確認できます。</p>
+    {jobId && <div className="batch-cue-actions" aria-label="候補を一括採用">
+      <strong>確認した候補をまとめて採用</strong>
+      <div className="row"><button type="button" className="secondary tiny" disabled={bulkBlocked || !visible.length || visible.length > 1000} onClick={() => { setChecked(visible.map((c) => c.id)); setReviewed(false); }}>表示中の候補を選ぶ</button><button type="button" className="secondary tiny" disabled={bulkBlocked || !checked.length} onClick={() => { setChecked([]); setReviewed(false); }}>候補の選択を解除</button></div>
+      <p className="field-help" role="status">選択 {selected.length}候補・{new Set(selected.map((c) => c.track_id ?? "single")).size}曲{selected.some((c) => c.band !== "high") ? "（要確認・低信頼の候補を含みます）" : ""}。表のチェックで対象を変更できます。</p>
+      <label htmlFor="bulk-cue-kind">一括採用するCue<select id="bulk-cue-kind" value={bulkKind} disabled={bulkBlocked} onChange={(e) => { setBulkKind(e.target.value as CueKind | "PRESET"); setReviewed(false); }}><option value="PRESET">事前設定どおり（未指定はMemory Cue）</option><option value="MEMORY">Memory Cue</option><option value="HOT">Hot Cue</option><option value="BOTH">Memory Cue + Hot Cue（両方）</option></select></label>
+      <label className="inline-check"><input type="checkbox" checked={reviewed} disabled={bulkBlocked || !selected.length} onChange={(e) => setReviewed(e.target.checked)} />選択した候補を試聴・確認しました</label>
+      <button type="button" disabled={bulkBlocked || !reviewed || !selected.length || selected.length > 1000} onClick={acceptSelection}>{bulkBusy ? "一括採用しています…" : `選択した${selected.length}候補を一括採用`}</button>
+      <p className="field-help">Memory Cueは10件を超えて採用できます。XMLに出力する分は下の「3」で1曲10件まで選びます。一度に1,000候補まで一括採用できます。</p>
+    </div>}
+    <div className="table-scroll candidate-scroll" tabIndex={0} role="region" aria-label="キュー候補一覧">
+    <table className="candidate-table">
       <thead>
         <tr>
+          {jobId && <th>選択</th>}
+          {trackNames && <th>曲名</th>}
           <th>#</th>
           <th>種別</th>
           <th>時刻</th>
@@ -147,20 +190,23 @@ export function CandidateTable({
       </thead>
       <tbody>
         {visible.map((c) => {
-          const meta = cueMeta(c.type);
+          const meta = { ...cueMeta(c.type), label: c.display_label ?? cueMeta(c.type).label };
           const decision = c.accepted == null ? "未判定" : c.accepted ? `採用 (${CUE_KIND_LABEL[c.cue_kind ?? "MEMORY"]})` : "却下";
           return (
             <Fragment key={c.id}>
               <tr>
-                <td className="mono muted">{c.rank}</td>
-                <td>
+                {jobId && <td className="candidate-selection-cell"><label className="candidate-select"><input type="checkbox" aria-label={`${trackNames?.[c.track_id ?? ""] ?? ""} ${cueMeta(c.type).label} ${fmtTime(c.time_ms)}を一括採用の対象にする`.trim()} checked={checked.includes(c.id)} disabled={bulkBlocked} onChange={(e) => { setChecked((previous) => e.target.checked ? [...previous, c.id] : previous.filter((id) => id !== c.id)); setReviewed(false); }} /></label></td>}
+                {trackNames && <td className="candidate-track-name">{trackNames[c.track_id ?? ""] ?? "曲情報を再取得してください"}</td>}
+                <td className="mono muted candidate-rank-cell">{c.rank}</td>
+                <td className="candidate-type-cell">
                   <span className="chip" style={{ background: meta.color }}>
                     {meta.icon} {meta.label}
                   </span>
+                  {c.preset && <div className="field-help"><CueKindSwatch kind={c.preset.cue_kind} preset={c.preset} />事前設定：{CUE_KIND_LABEL[c.preset.cue_kind]}</div>}
                 </td>
-                <td className="mono">{fmtTime(drafts[c.id]?.time_ms ?? c.time_ms)}{drafts[c.id] && <div className="field-help">調整中・未保存</div>}{!drafts[c.id] && c.original_time_ms != null && c.original_time_ms !== c.time_ms && <div className="field-help">調整済み</div>}</td>
-                <td className="mono muted">{c.beat ?? "-"}</td>
-                <td>
+                <td className="mono" data-label="時刻">{fmtTime(drafts[c.id]?.time_ms ?? c.time_ms)}{drafts[c.id] && <div className="field-help">調整中・未保存</div>}{!drafts[c.id] && c.original_time_ms != null && c.original_time_ms !== c.time_ms && <div className="field-help">調整済み</div>}</td>
+                <td className="mono muted" data-label="ビート">{c.beat ?? "-"}</td>
+                <td className="candidate-confidence-cell" data-label="信頼度">
                   <div className="meter-wrap">
                     <div className={`meter ${c.band}`}>
                       <span style={{ width: `${c.confidence}%` }} />
@@ -169,21 +215,22 @@ export function CandidateTable({
                     <span className={`badge ${c.band}`}>{({ high: "高", review: "要確認", reject: "低" })[c.band]}</span>
                   </div>
                 </td>
-                <td>
-                  <span className={c.accepted ? "decision-accepted" : "muted"} style={{ fontSize: 12 }}>{c.accepted && <CueKindSwatch kind={c.cue_kind ?? "MEMORY"} />}{pending[c.id] ? "保存中…" : decision}</span>
+                <td className="candidate-decision-cell" data-label="判定">
+                  <span className={c.accepted ? "decision-accepted" : "muted"} style={{ fontSize: 12 }}>{c.accepted && <CueKindSwatch kind={c.cue_kind ?? "MEMORY"} preset={c.preset} />}{pending[c.id] ? "保存中…" : decision}</span>
                 </td>
-                <td>
+                <td className="candidate-actions-cell">
                   <div className="cue-decision-actions">
-                    <button className="tiny" style={kindButtonStyle("MEMORY")} disabled={disabled || pending[c.id] || adjusting} aria-pressed={c.accepted === true && c.cue_kind === "MEMORY"} onClick={() => decide(c, true, "MEMORY")}>
+                    {c.preset && <button type="button" className="tiny" style={{ background: presetBackground(c.preset, c.preset.cue_kind, kindBackground), color: c.preset.cue_kind === "BOTH" ? "#fff" : colorText(presetBackground(c.preset, c.preset.cue_kind, kindBackground)) }} disabled={locked || pending[c.id] || adjusting} onClick={() => decide(c, true, c.preset!.cue_kind)}>設定どおりに採用</button>}
+                    <button className="tiny" style={kindButtonStyle("MEMORY", c.preset)} disabled={locked || pending[c.id] || adjusting} aria-pressed={c.accepted === true && c.cue_kind === "MEMORY"} onClick={() => decide(c, true, "MEMORY")}>
                       Memory Cue
                     </button>
-                    <button className="tiny" style={kindButtonStyle("HOT")} disabled={disabled || pending[c.id] || adjusting} aria-pressed={c.accepted === true && c.cue_kind === "HOT"} onClick={() => decide(c, true, "HOT")}>
+                    <button className="tiny" style={kindButtonStyle("HOT", c.preset)} disabled={locked || pending[c.id] || adjusting} aria-pressed={c.accepted === true && c.cue_kind === "HOT"} onClick={() => decide(c, true, "HOT")}>
                       Hot Cue
                     </button>
-                    <button className="secondary tiny" disabled={disabled || pending[c.id] || adjusting} aria-pressed={c.accepted === true && c.cue_kind === "BOTH"} onClick={() => decide(c, true, "BOTH")}><CueKindSwatch kind="BOTH" />両方</button>
-                    <button type="button" className="secondary tiny" disabled={!onAudition} onClick={() => onAudition?.(drafts[c.id]?.time_ms ?? c.time_ms)}>試聴</button>
-                    <button type="button" className="secondary tiny" disabled={disabled || pending[c.id] || adjusting} aria-expanded={editing === c.id} onClick={() => { setEditing(editing === c.id ? null : c.id); setPositionError(""); }}>位置を調整</button>
-                    <button className="secondary tiny" disabled={disabled || pending[c.id] || adjusting} onClick={() => decide(c, false, c.cue_kind ?? "MEMORY")}>
+                    <button className="secondary tiny" disabled={locked || pending[c.id] || adjusting} aria-pressed={c.accepted === true && c.cue_kind === "BOTH"} onClick={() => decide(c, true, "BOTH")}><CueKindSwatch kind="BOTH" preset={c.preset} />両方</button>
+                    <button type="button" className="secondary tiny" disabled={!onAudition || locked} onClick={() => onAudition?.(drafts[c.id]?.time_ms ?? c.time_ms, c.track_id)}>試聴</button>
+                    <button type="button" className="secondary tiny" disabled={locked || pending[c.id] || adjusting} aria-expanded={editing === c.id} onClick={() => { setEditing(editing === c.id ? null : c.id); setPositionError(""); }}>位置を調整</button>
+                    <button className="secondary tiny" disabled={locked || pending[c.id] || adjusting} onClick={() => decide(c, false, c.cue_kind ?? "MEMORY")}>
                       却下
                     </button>
                     <button
@@ -196,7 +243,7 @@ export function CandidateTable({
                   </div>
                 </td>
               </tr>
-              {editing === c.id && <tr><td colSpan={7} className="candidate-position-editor">
+              {editing === c.id && <tr className="candidate-extra-row"><td colSpan={colCount} className="candidate-position-editor">
                 <p className="field-help">試聴して位置を合わせ、Hot Cue／Memory Cue／両方の採用ボタンで保存します。調整だけでは判定・XMLは変更しません。</p>
                 <div className="row">
                   <label>時刻（秒）<input type="number" min="0" step="0.001" aria-label="Cueを置く時刻（秒）" value={positionInputs[c.id] ?? ((drafts[c.id]?.time_ms ?? c.time_ms) / 1000).toFixed(3)} disabled={adjusting} onChange={(e) => setPositionInputs((current) => ({ ...current, [c.id]: e.target.value }))} /></label>
@@ -204,15 +251,15 @@ export function CandidateTable({
                   <button type="button" className="secondary tiny" disabled={adjusting} onClick={() => preview(c)}>時刻を合わせる</button>
                   <button type="button" className="secondary tiny" disabled={adjusting} onClick={() => preview(c, -1)}>← 1{snap === "BEAT" ? "拍" : "小節"}</button>
                   <button type="button" className="secondary tiny" disabled={adjusting} onClick={() => preview(c, 1)}>1{snap === "BEAT" ? "拍" : "小節"} →</button>
-                  <button type="button" className="secondary tiny" disabled={!onAudition || adjusting} onClick={() => onAudition?.(drafts[c.id]?.time_ms ?? c.time_ms)}>調整位置を試聴</button>
+                  <button type="button" className="secondary tiny" disabled={!onAudition || adjusting} onClick={() => onAudition?.(drafts[c.id]?.time_ms ?? c.time_ms, c.track_id)}>調整位置を試聴</button>
                   <button type="button" className="secondary tiny" disabled={adjusting} onClick={() => preview(c, 0, true)}>元の解析位置へ</button>
                   <button type="button" className="secondary tiny" disabled={adjusting} onClick={() => { setDrafts((current) => { const next = { ...current }; delete next[c.id]; return next; }); setPositionInputs((current) => { const next = { ...current }; delete next[c.id]; return next; }); setEditing(null); }}>調整を破棄</button>
                 </div>
                 {positionError && <p className="error" role="alert">{positionError}</p>}
               </td></tr>}
               {open === c.id && (
-                <tr>
-                  <td colSpan={7} style={{ background: "rgba(0,0,0,0.18)" }}>
+                <tr className="candidate-extra-row">
+                  <td colSpan={colCount} style={{ background: "rgba(0,0,0,0.18)" }}>
                     <Evidence c={c} />
                   </td>
                 </tr>

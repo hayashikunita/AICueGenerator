@@ -32,6 +32,7 @@ def content_to_dict(content: Any) -> dict[str, Any]:
         "content_id": str(getattr(content, "ID", "") or ""),
         "title": (getattr(content, "Title", None) or None),
         "artist": _content_artist(content),
+        "album": _content_album(content),
         "path": (getattr(content, "FolderPath", None) or None),
         "bpm": _content_bpm(content),
         "length_sec": getattr(content, "Length", None),

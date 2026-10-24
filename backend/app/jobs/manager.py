@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..persistence.repositories import Repository
+from ..rekordbox.metadata import read_track_metadata
 from .progress import ProgressHub
 from .worker import run_job
 
@@ -32,6 +33,7 @@ class JobManager:
         """曲参照を登録しジョブを作成、非同期実行を開始する。"""
         repo = Repository(self._db_path)
         try:
+            metadata = read_track_metadata(tracks)
             track_ids: list[str] = []
             for t in tracks:
                 tid = repo.upsert_track(
@@ -42,6 +44,7 @@ class JobManager:
                     sample_rate=t.get("sample_rate"),
                     rb_uuid=t.get("rb_uuid"),
                     writable=t.get("writable", False),
+                    metadata=metadata.get(str(t["content_id"])),
                 )
                 track_ids.append(tid)
             job_id = repo.create_job(params=params, track_ids=track_ids)
@@ -65,4 +68,7 @@ class JobManager:
         return True
 
     def shutdown(self) -> None:
+        with self._lock:
+            for event in self._cancel_events.values():
+                event.set()
         self._executor.shutdown(wait=False, cancel_futures=True)

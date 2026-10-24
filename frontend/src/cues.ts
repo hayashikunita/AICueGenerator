@@ -14,15 +14,27 @@ interface CueBase {
 }
 
 // 凡例・設定での表示順。
-export const CUE_ORDER = ["INTRO_END", "BUILD", "DROP", "BREAK", "OUTRO", "INTRO_START", "CHORUS_START", "CHORUS_END", "CHORUS_END_MINUS_8_BARS", "VOCAL_START"] as const;
+export const CUE_ORDER = ["INTRO_END", "BUILD", "DROP", "BREAK", "OUTRO", "OUTRO_END", "INTRO_START", "CHORUS_START", "CHORUS_END", "CHORUS_END_MINUS_8_BARS", "VOCAL_START", "INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3", "INTRO_INTERVAL", "INTRO_END_BEFORE", "OUTRO_INTERVAL", "OUTRO_END_BEFORE", "FADE_END", "FADE_END_BEFORE", "TRACK_END", "TRACK_END_BEFORE"] as const;
 
 const CUES: Record<string, CueBase> = {
+  INTRO_BAR: { label: "イントロの指定小節目", color: "#5b8cff", icon: "▸" },
+  INTRO_BAR_X2: { label: "イントロの指定小節目×2", color: "#5b8cff", icon: "▸" },
+  INTRO_BAR_X3: { label: "イントロの指定小節目×3", color: "#5b8cff", icon: "▸" },
   INTRO_START: { label: "イントロの始まり", color: "#5b8cff", icon: "▶" },
   CHORUS_START: { label: "サビの始まり", color: "#ff5d73", icon: "♫" },
   CHORUS_END: { label: "サビの終わり", color: "#e6b23a", icon: "■" },
   CHORUS_END_MINUS_8_BARS: { label: "サビ終わり8小節前", color: "#9a7cff", icon: "↤" },
   VOCAL_START: { label: "歌い始め（要確認）", color: "#3fb6c9", icon: "♪" },
-  INTRO_END: { label: "Intro End", color: "#5b8cff", icon: "▶" },
+  INTRO_END: { label: "イントロの終わり", color: "#5b8cff", icon: "▶" },
+  OUTRO_END: { label: "アウトロの終わり", color: "#9a7cff", icon: "■" },
+  INTRO_INTERVAL: { label: "イントロ内の小節間隔", color: "#5b8cff", icon: "▸" },
+  INTRO_END_BEFORE: { label: "イントロの終わりの手前", color: "#5b8cff", icon: "↤" },
+  OUTRO_INTERVAL: { label: "アウトロ内の小節間隔", color: "#9a7cff", icon: "▸" },
+  OUTRO_END_BEFORE: { label: "アウトロの終わりの手前", color: "#9a7cff", icon: "↤" },
+  FADE_END: { label: "音量が小さくなる終わり", color: "#3fb6c9", icon: "◁" },
+  FADE_END_BEFORE: { label: "音量が小さくなる終わりの手前", color: "#3fb6c9", icon: "↤" },
+  TRACK_END: { label: "曲の終わり", color: "#9aa2b1", icon: "■" },
+  TRACK_END_BEFORE: { label: "曲の終わりの手前", color: "#9aa2b1", icon: "↤" },
   BUILD: { label: "Build", color: "#e6b23a", icon: "↗" },
   DROP: { label: "Drop", color: "#ff5d73", icon: "⚡" },
   BREAK: { label: "Break", color: "#3fb6c9", icon: "▽" },

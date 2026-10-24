@@ -76,6 +76,7 @@ def best_phase_grid(
 
     def score(g: PhraseGrid) -> float:
         idx = g.boundary_beats[(g.boundary_beats >= 0) & (g.boundary_beats < len(strength))]
-        return float(np.sum(strength[idx])) if idx.size else 0.0
+        idx = idx[idx > 0]  # The file start has no preceding section to compare.
+        return float(np.mean(strength[idx])) if idx.size else 0.0
 
     return max(grids, key=score)

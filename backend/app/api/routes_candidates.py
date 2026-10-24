@@ -10,11 +10,26 @@ from ..schemas.jobs import (
     DecisionResponse,
     PositionRequest,
     ManualCandidateRequest,
+    BatchDecisionRequest,
+    CandidateListResponse,
 )
 from .deps import get_repo, require_token
 from .candidate_presenter import candidate_out, nearest_index
 
 router = APIRouter(prefix="/api/v1", tags=["candidates"], dependencies=[Depends(require_token)])
+
+
+@router.post("/jobs/{job_id}/candidates/accept", response_model=CandidateListResponse)
+def accept_candidates(job_id: str, req: BatchDecisionRequest, repo: Repository = Depends(get_repo)) -> CandidateListResponse:
+    if repo.get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    try:
+        repo.accept_candidates(job_id, req.candidate_ids, req.cue_kind)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    repo.add_audit(actor="user", action="accept_candidates", result="ok", job_id=job_id,
+                   after={"candidate_ids": req.candidate_ids, "cue_kind": req.cue_kind})
+    return CandidateListResponse(candidates=[candidate_out(r) for r in repo.list_candidates_for_job(job_id)])
 
 
 @router.get("/candidates/{candidate_id}", response_model=CandidateOut)

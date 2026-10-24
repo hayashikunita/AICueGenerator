@@ -1,8 +1,7 @@
 """特徴量抽出（基本設計書 §9.2 features）。
 
-numpy のみで実装。波形と拍時刻から拍単位の RMS / 低域比率 / スペクトルフラックス /
-オンセット強度を求める。HPSS（打楽器成分分離）は librosa 依存のため任意拡張とし、
-本実装ではフラックス/オンセットで打楽器性を近似する。
+numpy のみで実装。拍全体から RMS / 低域比率 / スペクトルフラックス /
+オンセット強度・12音のクロマ・16帯域の音色を求める。
 """
 
 from __future__ import annotations
@@ -23,6 +22,9 @@ class BeatFeatures:
     low_ratio: np.ndarray  # <200Hz のエネルギー比率
     flux: np.ndarray  # スペクトルフラックス（正の変化）
     onset: np.ndarray  # RMS の半波整流差分
+    chroma: np.ndarray | None = None  # (N, 12), harmonic content
+    bands: np.ndarray | None = None  # (N, 16), gain-independent timbre
+    vocal_ratio: np.ndarray | None = None
 
     def normalized(self) -> "BeatFeatures":
         """各特徴量を 0..1 に正規化した複製を返す。"""
@@ -32,6 +34,9 @@ class BeatFeatures:
             low_ratio=np.clip(self.low_ratio, 0.0, 1.0),
             flux=_minmax(self.flux),
             onset=_minmax(self.onset),
+            chroma=self.chroma,
+            bands=self.bands,
+            vocal_ratio=self.vocal_ratio,
         )
 
 
@@ -53,21 +58,21 @@ def _beat_segments(y: np.ndarray, sr: int, beat_times: np.ndarray) -> list[np.nd
     return segs
 
 
-def _low_ratio(seg: np.ndarray, sr: int, cutoff_hz: float = 200.0) -> float:
+def _musical_spectrum(seg: np.ndarray, sr: int) -> tuple[float, np.ndarray, np.ndarray]:
+    """Describe the entire beat, rather than only its first 512 samples."""
     if seg.size < 2:
-        return 0.0
-    spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
-    freqs = np.fft.rfftfreq(len(seg), d=1.0 / sr)
-    total = float(np.sum(spec) + _EPS)
-    low = float(np.sum(spec[freqs < cutoff_hz]))
-    return low / total
-
-
-def _spectrum(seg: np.ndarray, n: int = 512) -> np.ndarray:
-    if seg.size == 0:
-        return np.zeros(n // 2 + 1)
-    w = seg[: n] if seg.size >= n else np.pad(seg, (0, n - seg.size))
-    return np.abs(np.fft.rfft(w * np.hanning(len(w))))
+        return 0.0, np.zeros(12), np.zeros(16)
+    spectrum = np.abs(np.fft.rfft(seg * np.hanning(len(seg)))) / len(seg)
+    frequencies = np.fft.rfftfreq(len(seg), 1 / sr)
+    low = float(spectrum[frequencies < 200].sum() / (spectrum.sum() + _EPS))
+    valid = (frequencies >= 55) & (frequencies <= min(5000, sr / 2))
+    pitches = np.rint(69 + 12 * np.log2(frequencies[valid] / 440)).astype(int) % 12
+    chroma = np.bincount(pitches, weights=spectrum[valid], minlength=12)
+    edges = np.geomspace(40, max(41, sr / 2), 17)
+    indices = np.searchsorted(edges, frequencies, side="right") - 1
+    selected = (indices >= 0) & (indices < 16)
+    bands = np.bincount(indices[selected], weights=spectrum[selected], minlength=16)
+    return low, chroma, bands
 
 
 def extract_features(y: np.ndarray, sr: int, beat_times: np.ndarray) -> BeatFeatures:
@@ -78,12 +83,16 @@ def extract_features(y: np.ndarray, sr: int, beat_times: np.ndarray) -> BeatFeat
     rms = np.zeros(n)
     low = np.zeros(n)
     spectra = []
+    chroma = np.zeros((n, 12))
+    bands = np.zeros((n, 16))
 
     segs = _beat_segments(y, sr, beat_times)
     for i, seg in enumerate(segs):
         rms[i] = float(np.sqrt(np.mean(seg**2) + _EPS)) if seg.size else 0.0
-        low[i] = _low_ratio(seg, sr)
-        spectra.append(_spectrum(seg))
+        low[i], harmonic, spectrum = _musical_spectrum(seg, sr)
+        chroma[i] = harmonic / (harmonic.sum() + _EPS)
+        bands[i] = spectrum / (spectrum.sum() + _EPS)
+        spectra.append(spectrum)
 
     flux = np.zeros(n)
     for i in range(1, n):
@@ -93,7 +102,7 @@ def extract_features(y: np.ndarray, sr: int, beat_times: np.ndarray) -> BeatFeat
     onset = np.zeros(n)
     onset[1:] = np.maximum(np.diff(rms), 0.0)
 
-    return BeatFeatures(beat_times=beat_times, rms=rms, low_ratio=low, flux=flux, onset=onset)
+    return BeatFeatures(beat_times=beat_times, rms=rms, low_ratio=low, flux=flux, onset=onset, chroma=chroma, bands=bands)
 
 
 def repetition_matrix(bar_vectors: np.ndarray) -> np.ndarray:
