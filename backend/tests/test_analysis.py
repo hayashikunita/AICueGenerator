@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from app.analysis.beatgrid import beat_stability, uniform_beatgrid
 from app.analysis.features import extract_features
@@ -105,3 +106,31 @@ def test_pipeline_candidates_are_phrase_aligned():
     result = analyze_waveform(track.y, track.sr, bpm=track.bpm)
     assert result.candidates
     assert all(c.phrase_aligned for c in result.candidates)
+
+
+@pytest.mark.parametrize("beats", [4, 8, 16, 32, 64, 128])
+def test_beat_interval_matches_equivalent_bar_interval(beats):
+    track = synthesize_edm(bpm=128.0, sr=8000, seed=0)
+    by_beats = analyze_waveform(track.y, track.sr, bpm=track.bpm, beats_per_phrase=beats)
+    by_bars = analyze_waveform(track.y, track.sr, bpm=track.bpm, bars_per_phrase=beats // 4)
+    assert by_beats.candidates
+    assert by_beats.candidates == by_bars.candidates
+    # 候補は、選択した拍数の境界に同じ位相で整列する。
+    assert len({c.beat_index % beats for c in by_beats.candidates}) == 1
+
+
+def test_analysis_without_rekordbox_estimates_beats_from_audio(monkeypatch):
+    from app.analysis import pipeline
+    from app.analysis.beatgrid import uniform_beatgrid
+
+    track = synthesize_edm(bpm=120.0, sr=8000)
+    calls = []
+
+    def estimate(y, sr, *, beats_per_bar):
+        calls.append((len(y), sr))
+        return uniform_beatgrid(120.0, len(y) / sr, beats_per_bar=beats_per_bar)
+
+    monkeypatch.setattr(pipeline, "estimate_beatgrid", estimate)
+    result = analyze_waveform(track.y, track.sr, beats_per_phrase=8)
+    assert calls == [(len(track.y), track.sr)]
+    assert result.beatgrid.bpm == 120.0 and result.candidates

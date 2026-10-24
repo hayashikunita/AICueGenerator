@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 from typing import Any
 
 
@@ -85,21 +86,44 @@ def search_contents(db: Any, query: str, *, limit: int = 50) -> list[dict[str, A
 
 
 def list_playlists(db: Any) -> list[dict[str, Any]]:
-    """プレイリスト一覧 (id, name)。API 差異に備え防御的に取得する。"""
+    """フォルダ階層を含むプレイリスト一覧を取得する。取得失敗は呼び出し元へ返す。"""
     out: list[dict[str, Any]] = []
-    try:
-        rows = db.get_playlist()
-    except Exception:  # noqa: BLE001
-        return out
-    for pl in rows:
+    for pl in db.get_playlist():
         out.append(
             {
-                "id": getattr(pl, "ID", None),
-                "name": getattr(pl, "Name", None),
-                "parent_id": getattr(pl, "ParentID", None),
+                "id": str(pl.ID),
+                "name": pl.Name or "(無題)",
+                "parent_id": str(pl.ParentID) if pl.ParentID else None,
+                "is_folder": bool(pl.is_folder),
+                "is_smart": bool(pl.is_smart_playlist),
             }
         )
-    return out
+    by_id = {p["id"]: p for p in out}
+    for playlist in out:
+        names = [playlist["name"]]
+        seen = {playlist["id"]}
+        parent = playlist["parent_id"]
+        while parent in by_id and parent not in seen:
+            seen.add(parent)
+            names.insert(0, by_id[parent]["name"])
+            parent = by_id[parent]["parent_id"]
+        playlist["path"] = " / ".join(names)
+    return sorted(out, key=lambda p: (p["path"].casefold(), p["id"]))
+
+
+def playlist_tracks(db: Any, playlist_id: str) -> tuple[str, list[dict[str, Any]]] | None:
+    """通常リストは TrackNo 順、スマートリストは条件に一致する曲を取得する。"""
+    playlist = db.get_playlist(ID=playlist_id)
+    if playlist is None:
+        return None
+    if playlist.is_folder:
+        raise ValueError("フォルダ内のプレイリストを選んでください")
+    if playlist.is_smart_playlist:
+        contents = sorted(db.get_playlist_contents(playlist), key=lambda c: ((c.Title or "").casefold(), str(c.ID)))
+    else:
+        songs = sorted(db.get_playlist_songs(PlaylistID=playlist_id), key=lambda s: (s.TrackNo or 0, str(s.ID)))
+        contents = [s.Content for s in songs if s.Content is not None]
+    return playlist.Name or "(無題)", [content_to_dict(c) for c in contents]
 
 
 def get_cues(db: Any, content_id: Any) -> list[dict[str, Any]]:
@@ -145,34 +169,48 @@ def _parse_anlz(path: str) -> Any | None:
         return None
 
 
+def _analysis_tag(db: Any, content: Any, kind: str, order: tuple[str, ...]) -> tuple[Any, str] | None:
+    paths = _anlz_paths(db, content)
+    for extension in order:
+        path = paths.get(extension)
+        if not path:
+            continue
+        anlz = _parse_anlz(path)
+        if anlz is None:
+            continue
+        try:
+            return anlz.get_tag(kind), path
+        except (IndexError, KeyError):
+            continue
+    return None
+
+
 def read_beatgrid(db: Any, content: Any) -> dict[str, Any]:
     """ANLZ (PQTZ) からビートグリッド概要を読む。書込はしない。"""
     info: dict[str, Any] = {"available": False, "beat_count": 0, "downbeat_count": 0}
-    paths = _anlz_paths(db, content)
-    src = paths.get("DAT") or paths.get("EXT")
-    if not src:
+    found = _analysis_tag(db, content, "PQTZ", ("DAT", "EXT", "2EX"))
+    if found is None:
         return info
-    anlz = _parse_anlz(src)
-    if anlz is None:
-        return info
-    try:
-        tag = anlz.get("PQTZ")
-    except Exception:  # noqa: BLE001
-        tag = None
-    if tag is None:
-        return info
+    tag, src = found
     beats = getattr(getattr(tag, "content", tag), "entries", None)
-    if beats is None:
-        beats = getattr(tag, "beats", None)
     if beats is None:
         return info
     beats = list(beats)
-    downbeats = sum(1 for b in beats if getattr(b, "beat_number", None) == 1)
+    times = [float(b.time) / 1000 for b in beats]
+    numbers = [int(b.beat) for b in beats]
+    bpms = [float(b.tempo) / 100 for b in beats]
+    valid = len(times) >= 2 and all(math.isfinite(t) and t >= 0 for t in times) and all(a < b for a, b in zip(times, times[1:])) and all(1 <= n <= 4 for n in numbers)
+    downbeats = [i for i, number in enumerate(numbers) if number == 1]
+    if not valid or not downbeats:
+        return info
     info.update(
         available=True,
         source=Path(src).suffix.lstrip("."),
         beat_count=len(beats),
-        downbeat_count=downbeats,
+        downbeat_count=len(downbeats),
+        beat_times=times,
+        downbeat_indices=downbeats,
+        bpms=bpms,
     )
     return info
 
@@ -180,24 +218,71 @@ def read_beatgrid(db: Any, content: Any) -> dict[str, Any]:
 def read_phrases(db: Any, content: Any) -> dict[str, Any]:
     """ANLZ (PSSI) からフレーズ解析概要を読む。書込はしない。"""
     info: dict[str, Any] = {"available": False, "phrase_count": 0}
-    paths = _anlz_paths(db, content)
-    src = paths.get("EXT") or paths.get("EX2")
-    if not src:
+    found = _analysis_tag(db, content, "PSSI", ("EXT", "2EX", "DAT"))
+    if found is None:
         return info
-    anlz = _parse_anlz(src)
-    if anlz is None:
-        return info
-    try:
-        tag = anlz.get("PSSI")
-    except Exception:  # noqa: BLE001
-        tag = None
-    if tag is None:
-        return info
+    tag, _ = found
     content_obj = getattr(tag, "content", tag)
     entries = getattr(content_obj, "entries", None)
+    entries = list(entries) if entries is not None else []
+    mood = getattr(content_obj, "mood", None)
+    # PSSI phrase IDs depend on mood; never treat an unknown mood as a known one.
+    labels = {1: "INTRO", 5: "CHORUS", 6: "OUTRO"} if mood == 1 else (
+        {1: "INTRO", **{i: "VERSE" for i in range(2, 8)}, 8: "BRIDGE", 9: "CHORUS", 10: "OUTRO"} if mood in (2, 3) else {}
+    )
+    sections = []
+    ordered = sorted(entries, key=lambda e: int(e.beat))
+    for i, entry in enumerate(ordered):
+        start = int(entry.beat) - 1
+        end = int(ordered[i + 1].beat if i + 1 < len(ordered) else getattr(content_obj, "end_beat", 0)) - 1
+        kind = labels.get(getattr(entry, "kind", None), "UNKNOWN")
+        if start >= 0 and end > start:
+            if sections and sections[-1]["kind"] == kind and sections[-1]["end_beat"] == start:
+                sections[-1]["end_beat"] = end
+            else:
+                sections.append({"start_beat": start, "end_beat": end, "kind": kind})
     info.update(
         available=True,
-        mood=getattr(content_obj, "mood", None),
-        phrase_count=len(list(entries)) if entries is not None else 0,
+        mood=mood,
+        sections=sections,
+        phrase_count=len(entries),
+        boundary_beats=sorted({int(e.beat) - 1 for e in entries if int(e.beat) >= 1}),
     )
     return info
+
+
+def load_track_analysis(db: Any, content_id: str, expected_path: str | None = None) -> dict[str, Any]:
+    """rekordbox の解析スナップショット。DB/ANLZ へは書き込まない。"""
+    content = db.get_content(ID=content_id)
+    if content is None:
+        raise ValueError("rekordbox のライブラリから解析済みの曲を選んでください")
+    if expected_path and Path(str(content.FolderPath)).resolve() != Path(expected_path).resolve():
+        raise ValueError("選択した音源と rekordbox の登録パスが異なります。曲を選び直してください")
+    grid = read_beatgrid(db, content)
+    if not grid["available"]:
+        raise ValueError("rekordbox のビートグリッドを取得できません。BPM / Grid を解析・保存してから再取得してください")
+    phrases = read_phrases(db, content)
+    boundaries = [b for b in phrases.get("boundary_beats", []) if 0 <= b < grid["beat_count"]]
+    positive_bpms = sorted(b for b in grid["bpms"] if math.isfinite(b) and b > 0)
+    bpm = positive_bpms[len(positive_bpms) // 2] if positive_bpms else _content_bpm(content)
+    if not bpm:
+        raise ValueError("rekordbox の解析済み BPM を取得できません")
+    cues = []
+    warnings = []
+    try:
+        for cue in db.get_cue(ContentID=content_id):
+            if cue.InMsec is not None and cue.InMsec >= 0:
+                cues.append({"time_ms": int(cue.InMsec), "kind": int(cue.Kind or 0), "comment": cue.Comment or ""})
+    except Exception:
+        warnings.append("既存 Cue を取得できませんでした")
+    if not boundaries:
+        warnings.append("フレーズ情報は未取得です。rekordbox の小節頭を基準に候補を生成します")
+    return {
+        "source": "REKORDBOX", "available": True, "content_id": str(content.ID),
+        "title": content.Title, "bpm": bpm, "key": getattr(content, "KeyName", None),
+        "beat_count": grid["beat_count"], "downbeat_count": grid["downbeat_count"],
+        "beat_times": grid["beat_times"], "downbeat_indices": grid["downbeat_indices"],
+        "phrase_count": len(boundaries), "phrase_boundaries": boundaries,
+        "phrase_sections": [s for s in phrases.get("sections", []) if s["start_beat"] < grid["beat_count"]],
+        "existing_cues": sorted(cues, key=lambda c: c["time_ms"]), "warnings": warnings,
+    }

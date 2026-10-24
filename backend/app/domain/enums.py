@@ -4,11 +4,16 @@ from enum import Enum
 
 
 class CueType(str, Enum):
+    INTRO_START = "INTRO_START"
     INTRO_END = "INTRO_END"
     BREAK = "BREAK"
     BUILD = "BUILD"
     DROP = "DROP"
     OUTRO = "OUTRO"
+    CHORUS_START = "CHORUS_START"
+    CHORUS_END = "CHORUS_END"
+    CHORUS_END_MINUS_8_BARS = "CHORUS_END_MINUS_8_BARS"
+    VOCAL_START = "VOCAL_START"
 
 
 class CueKind(str, Enum):
@@ -28,6 +33,7 @@ class JobStatus(str, Enum):
 class BeatSource(str, Enum):
     ANLZ = "ANLZ"
     LIBROSA = "LIBROSA"
+    MANUAL = "MANUAL"
 
 
 class WriteAction(str, Enum):

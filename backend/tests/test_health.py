@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.persistence.db import SCHEMA_VERSION
 
 
 def test_health_requires_token() -> None:
@@ -24,5 +25,5 @@ def test_health_ok_with_token() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["schema_version"] == 1
+    assert body["schema_version"] == SCHEMA_VERSION
     assert body["rekordbox"]["state"] == "not_implemented"

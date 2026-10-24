@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { Diagnostics as Diag } from "../types";
 
@@ -17,18 +17,19 @@ export function Diagnostics() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const load = () => {
+  const load = useCallback(() => {
     setBusy(true);
+    setErr(null);
     api
       .diagnostics()
       .then(setD)
       .catch((e) => setErr(String(e)))
       .finally(() => setBusy(false));
-  };
+  }, []);
 
-  useEffect(load, []);
+  useEffect(load, [load]);
 
-  if (err) return <div className="panel error">診断取得エラー: {err}</div>;
+  if (err) return <div className="panel error" role="alert">接続状態を確認できませんでした: {err}<button className="secondary tiny" onClick={load} disabled={busy}>再試行</button></div>;
   if (!d)
     return (
       <div className="panel">
@@ -44,14 +45,14 @@ export function Diagnostics() {
     <div className="panel">
       <div className="banner">
         <Item ok={!d.process_running} warn={d.process_running} label={d.process_running ? "rekordbox 起動中" : "rekordbox 停止"} />
-        <Item ok={d.db_key_available} label="DB鍵" />
-        <Item ok={d.schema_supported} warn={!d.schema_supported} label="スキーマ対応" />
-        <Item ok={d.writable} warn={!d.writable} label={d.writable ? "書込可" : "書込ロック(読取専用)"} />
+        <span className="pill">ライブラリDBは読み取り専用</span>
         <span className="spacer" />
         <button className="secondary tiny" disabled={busy} onClick={load}>
           {busy ? "確認中…" : "再診断"}
         </button>
       </div>
+      <p className="field-help">解析済みデータを参照します。小節頭は対象曲を確認して保存した場合のみ変更します。新しい Cue は XML へ書き出せます。</p>
+      <details className="diagnostic-details"><summary>連携の詳細</summary><div className="row" style={{ marginTop: 10 }}><Item ok={d.db_key_available} label={d.db_key_available ? "復号モジュールあり" : "復号モジュールを確認してください"} /></div></details>
     </div>
   );
 }

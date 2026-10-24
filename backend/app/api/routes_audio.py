@@ -3,10 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..persistence.repositories import Repository
+from ..config import get_settings
+from ..rekordbox.adapter import open_rekordbox
+from ..rekordbox.errors import AdapterError
+from ..rekordbox.reader import get_content_detail
 from .deps import get_repo, require_token_query
 
 router = APIRouter(prefix="/api/v1", tags=["audio"])
@@ -50,9 +54,34 @@ def stream_audio(
     row = repo.get_track(track_id)
     if row is None:
         raise HTTPException(status_code=404, detail="track not found")
-    path = Path(str(row["path"]))
+    return audio_response(Path(str(row["path"])), request)
+
+
+@router.get("/rekordbox/tracks/{content_id}/audio")
+def stream_library_audio(
+    content_id: str,
+    request: Request,
+    path: str = Query(min_length=1),
+    _: None = Depends(require_token_query),
+) -> StreamingResponse:
+    """Resolve the selected library track read-only, before any analysis job exists."""
+    settings = get_settings()
+    try:
+        with open_rekordbox(path=settings.rekordbox_db_path, key=settings.rekordbox_key) as db:
+            detail = get_content_detail(db, content_id)
+    except AdapterError as exc:
+        raise HTTPException(status_code=503, detail=exc.message) from exc
+    if detail is None or not detail.get("path"):
+        raise HTTPException(status_code=404, detail="選択した曲の音源が見つかりません。")
+    registered = Path(detail["path"])
+    if registered.resolve() != Path(path).resolve():
+        raise HTTPException(status_code=409, detail="選択中の曲と音源のパスが一致しません。曲を選び直してください。")
+    return audio_response(registered, request)
+
+
+def audio_response(path: Path, request: Request) -> StreamingResponse:
     if not path.is_file():
-        raise HTTPException(status_code=404, detail="audio file not found")
+        raise HTTPException(status_code=404, detail="音源ファイルが見つかりません。保存場所を確認してください。")
 
     file_size = path.stat().st_size
     media_type = _media_type(path)
@@ -60,17 +89,19 @@ def stream_audio(
 
     if range_header and range_header.strip().startswith("bytes="):
         spec = range_header.strip()[len("bytes=") :].split(",")[0].strip()
-        start_s, _, end_s = spec.partition("-")
-        if start_s == "":
-            # 末尾からのサフィックス指定 (bytes=-500)
-            suffix = int(end_s) if end_s else 0
-            length = min(suffix, file_size)
-            start = file_size - length
-            end = file_size - 1
-        else:
-            start = int(start_s)
-            end = int(end_s) if end_s else file_size - 1
-            end = min(end, file_size - 1)
+        try:
+            start_s, separator, end_s = spec.partition("-")
+            if not separator or not (start_s or end_s) or any(s and (not s.isascii() or not s.isdigit()) for s in (start_s, end_s)):
+                raise ValueError("invalid range")
+            if start_s == "":
+                suffix = int(end_s)
+                start = file_size - min(suffix, file_size)
+                end = file_size - 1
+            else:
+                start = int(start_s)
+                end = min(int(end_s), file_size - 1) if end_s else file_size - 1
+        except ValueError:
+            raise HTTPException(status_code=416, headers={"Content-Range": f"bytes */{file_size}"}, detail="requested range not satisfiable") from None
         if start > end or start >= file_size:
             raise HTTPException(
                 status_code=416,

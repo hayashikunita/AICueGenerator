@@ -6,26 +6,41 @@ import { JobDetail } from "./components/JobDetail";
 import { JobList } from "./components/JobList";
 import { NewJobForm } from "./components/NewJobForm";
 import type { JobSummary } from "./types";
+import { TERMINAL } from "./jobs";
 
 export function App() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [writable, setWritable] = useState(false);
+  const [jobsError, setJobsError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   const refreshJobs = useCallback(() => {
+    if (!token) return;
     api
       .listJobs()
-      .then((r) => setJobs(r.jobs))
-      .catch(() => {});
+      .then((r) => {
+        setJobs(r.jobs);
+        setJobsError("");
+      })
+      .catch((e) => setJobsError(`履歴を取得できませんでした: ${e}`))
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
     refreshJobs();
-    api
-      .diagnostics()
-      .then((d) => setWritable(d.writable))
-      .catch(() => {});
   }, [refreshJobs]);
+
+  useEffect(() => {
+    if (!jobs.some((j) => !TERMINAL.has(j.status))) return;
+    const timer = window.setInterval(refreshJobs, 4000);
+    return () => window.clearInterval(timer);
+  }, [jobs, refreshJobs]);
+
+  useEffect(() => {
+    if (activeId && window.matchMedia("(max-width: 800px)").matches) {
+      document.getElementById("analysis-result")?.scrollIntoView({ block: "start" });
+    }
+  }, [activeId]);
 
   if (!token) {
     return (
@@ -54,7 +69,12 @@ export function App() {
         </div>
       </header>
 
+      <nav className="workflow" aria-label="使い方">
+        <span><b>1</b> 曲を選んで解析</span><span><b>2</b> 試聴してキューを採用</span><span><b>3</b> rekordbox へ書き出し</span>
+      </nav>
       <Diagnostics />
+
+      {jobsError && <div className="error row" role="alert"><span>{jobsError}</span><button className="secondary tiny" onClick={refreshJobs}>再試行</button></div>}
 
       <div className="grid">
         <div>
@@ -64,17 +84,19 @@ export function App() {
               setActiveId(id);
             }}
           />
+          <JobList jobs={jobs} activeId={activeId} onSelect={setActiveId} loading={loading} />
           <CueColorSettings />
-          <JobList jobs={jobs} activeId={activeId} onSelect={setActiveId} />
         </div>
-        <div>
+        <div id="analysis-result" className="analysis-result">
           {activeId ? (
-            <JobDetail jobId={activeId} writable={writable} onJobUpdated={refreshJobs} />
+            <JobDetail key={activeId} jobId={activeId} onJobUpdated={refreshJobs} />
           ) : (
             <div className="panel">
               <div className="empty">
                 <span className="emoji">🎚️</span>
-                左のジョブを選択するか、新規解析を開始してください。
+                <h3>曲の展開を、キューに。</h3>
+                <p>曲を選んで解析すると、Intro・Break・Build・Drop・Outro の候補が表示されます。</p>
+                <p>音源を試聴し、使いたい候補を採用して rekordbox へ書き出しましょう。</p>
               </div>
             </div>
           )}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -171,6 +172,67 @@ def test_top_k_is_honored(tmp_path):
         assert per_type and all(n <= 1 for n in per_type.values())
 
 
+@pytest.mark.parametrize("beats", [4, 8, 16])
+def test_beat_interval_is_used_by_worker_and_saved_in_history(tmp_path, beats):
+    from app.analysis.pipeline import analyze_file
+
+    track = synthesize_edm(bpm=128.0, sr=8000, seed=0)
+    wav = write_wav(tmp_path / f"beats_{beats}.wav", track.y, track.sr)
+    expected = analyze_file(str(wav), bpm=128.0, beats_per_phrase=beats)
+    with TestClient(app) as client:
+        response = client.post("/api/v1/jobs", headers=_auth(), json={
+            "params": {"bpm": 128.0, "beats_per_phrase": beats},
+            "tracks": [{"content_id": f"BEATS-{beats}", "path": str(wav)}],
+        })
+        assert response.status_code == 201
+        job_id = response.json()["job_id"]
+        job = _wait_job(client, job_id)
+        assert job["status"] == "COMPLETED" and job["failed"] == 0
+        assert job["params"]["beats_per_phrase"] == beats
+        candidates = client.get(f"/api/v1/jobs/{job_id}/candidates", headers=_auth()).json()["candidates"]
+        actual = [(c["type"], c["beat"], c["rank"]) for c in candidates]
+        assert actual == [(c.cue_type.value, c.beat_index, c.rank) for c in expected.candidates]
+        assert candidates
+        history = client.get("/api/v1/jobs", headers=_auth()).json()["jobs"]
+        assert next(j for j in history if j["id"] == job_id)["params"]["beats_per_phrase"] == beats
+
+
+@pytest.mark.parametrize("beats", [0, -4, 3, 6, 4.5, 516])
+def test_invalid_beat_intervals_are_rejected(beats):
+    with TestClient(app) as client:
+        response = client.post("/api/v1/jobs", headers=_auth(), json={
+            "params": {"beats_per_phrase": beats},
+            "tracks": [{"content_id": "INVALID-BEATS", "path": "not-used.wav"}],
+        })
+        assert response.status_code == 422
+
+
+def test_reanalyzing_other_beat_interval_does_not_mix_candidates_or_decisions(tmp_path):
+    track = synthesize_edm(bpm=128.0, sr=8000)
+    wav = write_wav(tmp_path / "same_track.wav", track.y, track.sr)
+    with TestClient(app) as client:
+        snapshots = []
+        for beats in (4, 8):
+            response = client.post("/api/v1/jobs", headers=_auth(), json={
+                "params": {"bpm": 128.0, "beats_per_phrase": beats},
+                "tracks": [{"content_id": "SAME-TRACK-BEAT-INTERVAL", "path": str(wav)}],
+            })
+            job_id = response.json()["job_id"]
+            assert _wait_job(client, job_id)["failed"] == 0
+            candidates = client.get(f"/api/v1/jobs/{job_id}/candidates", headers=_auth()).json()["candidates"]
+            assert candidates
+            snapshots.append((job_id, {c["id"] for c in candidates}))
+            if beats == 4:
+                client.post(f"/api/v1/candidates/{candidates[0]['id']}/decision", headers=_auth(),
+                            json={"accepted": True, "cue_kind": "MEMORY"})
+        assert snapshots[0][1].isdisjoint(snapshots[1][1])
+        for index, (job_id, expected_ids) in enumerate(snapshots):
+            restored = client.get(f"/api/v1/jobs/{job_id}/candidates", headers=_auth()).json()["candidates"]
+            assert {c["id"] for c in restored} == expected_ids
+            plan = client.post("/api/v1/write/plan", headers=_auth(), json={"job_id": job_id}).json()
+            assert plan["add"] == (1 if index == 0 else 0)
+
+
 def test_rekordbox_search_is_failsafe():
     with TestClient(app) as client:
         resp = client.get("/api/v1/rekordbox/tracks?query=test", headers=_auth())
@@ -263,6 +325,55 @@ def test_diagnostics_endpoint():
         body = resp.json()
         assert body["state"] == "ok"
         assert "writable" in body
+
+
+def test_history_and_decisions_survive_reopening():
+    from app.config import get_settings
+    from app.persistence.repositories import Repository
+
+    with TestClient(app) as client:
+        with Repository(get_settings().db_path) as repo:
+            track_id = repo.upsert_track(
+                content_id="REVIEW-ROUNDTRIP", path="C:/Music/確認用の曲.wav", fmt="WAV"
+            )
+            job_id = repo.create_job(params={}, track_ids=[track_id])
+            run_id = repo.create_run(
+                track_id=track_id, engine_version="test", params={}, fingerprint="review",
+                beat_source="test", pssi_used=False,
+            )
+            ids = repo.add_candidates(run_id, [
+                {"type": "DROP", "time_ms": 60000, "confidence": 90, "rank": 1},
+                {"type": "BREAK", "time_ms": 30000, "confidence": 60, "rank": 1},
+            ])
+
+        history = client.get("/api/v1/jobs", headers=_auth()).json()["jobs"]
+        assert next(j for j in history if j["id"] == job_id)["track_path"] == "C:/Music/確認用の曲.wav"
+        assert client.get(f"/api/v1/jobs/{job_id}", headers=_auth()).json()["track_path"] == "C:/Music/確認用の曲.wav"
+        initial = client.get(f"/api/v1/jobs/{job_id}/candidates", headers=_auth()).json()["candidates"]
+        assert len(initial) == 2
+        assert all(c["accepted"] is None and c["cue_kind"] is None for c in initial)
+
+        for candidate_id, accepted, kind in [(ids[0], True, "HOT"), (ids[1], False, "MEMORY")]:
+            response = client.post(
+                f"/api/v1/candidates/{candidate_id}/decision", headers=_auth(),
+                json={"accepted": accepted, "cue_kind": kind},
+            )
+            assert response.status_code == 200
+
+    # 新しいセッションでも採用・却下を区別し、同じ候補を重複表示しない。
+    with TestClient(app) as client:
+        restored = client.get(f"/api/v1/jobs/{job_id}/candidates", headers=_auth()).json()["candidates"]
+        by_id = {c["id"]: c for c in restored}
+        assert len(restored) == 2
+        assert by_id[ids[0]]["accepted"] is True
+        assert by_id[ids[0]]["cue_kind"] == "HOT"
+        assert by_id[ids[1]]["accepted"] is False
+        detail = client.get(f"/api/v1/candidates/{ids[0]}", headers=_auth()).json()
+        assert detail["accepted"] is True and detail["cue_kind"] == "HOT"
+        client.post(f"/api/v1/candidates/{ids[0]}/decision", headers=_auth(),
+                    json={"accepted": True, "cue_kind": "MEMORY"})
+        updated = client.get(f"/api/v1/candidates/{ids[0]}", headers=_auth()).json()
+        assert updated["accepted"] is True and updated["cue_kind"] == "MEMORY"
 
 
 def test_execute_rejects_tampered_hash(tmp_path):

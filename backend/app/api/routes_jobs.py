@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 
-from ..analysis.scoring import confidence_band
+from .candidate_presenter import candidate_out
 from ..common import loads
 from ..jobs.manager import JobManager
 from ..persistence.repositories import Repository, row_to_dict
@@ -13,9 +13,9 @@ from ..schemas.jobs import (
     CandidateOut,
     CreateJobRequest,
     CreateJobResponse,
-    EvidenceOut,
     JobListResponse,
     JobSummary,
+    JobParams,
     JobTrackListResponse,
     JobTrackOut,
 )
@@ -25,19 +25,15 @@ router = APIRouter(prefix="/api/v1", tags=["jobs"], dependencies=[Depends(requir
 
 
 def _candidate_out(row) -> CandidateOut:
-    d = dict(row)
-    evidence = [EvidenceOut(**e) for e in (loads(d.get("evidence_json")) or [])]
-    return CandidateOut(
-        id=d["id"],
-        run_id=d["run_id"],
-        type=d["type"],
-        time_ms=d["time_ms"],
-        beat=d["beat"],
-        confidence=d["confidence"],
-        rank=d["rank"],
-        band=confidence_band(float(d["confidence"])),
-        evidence=evidence,
-    )
+    return candidate_out(row)
+
+
+def _report_candidate(row) -> dict:
+    data = dict(row)
+    view = candidate_out(row)
+    data.pop("beat_times_json", None)
+    data.update(time_ms=view.time_ms, beat=view.beat, original_time_ms=view.original_time_ms)
+    return data
 
 
 @router.post("/jobs", response_model=CreateJobResponse, status_code=201)
@@ -51,7 +47,7 @@ def create_job(req: CreateJobRequest, manager: JobManager = Depends(get_manager)
 
 @router.get("/jobs", response_model=JobListResponse)
 def list_jobs(repo: Repository = Depends(get_repo)) -> JobListResponse:
-    return JobListResponse(jobs=[JobSummary(**dict(r)) for r in repo.list_jobs()])
+    return JobListResponse(jobs=[_job_summary(r) for r in repo.list_jobs()])
 
 
 @router.get("/jobs/{job_id}", response_model=JobSummary)
@@ -59,7 +55,11 @@ def get_job(job_id: str, repo: Repository = Depends(get_repo)) -> JobSummary:
     row = repo.get_job(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return JobSummary(**dict(row))
+    return _job_summary(row)
+
+
+def _job_summary(row) -> JobSummary:
+    return JobSummary(**dict(row), params=JobParams(**(loads(row["params_json"]) or {})))
 
 
 @router.post("/jobs/{job_id}/cancel", status_code=202)
@@ -84,6 +84,7 @@ def job_tracks(job_id: str, repo: Repository = Depends(get_repo)) -> JobTrackLis
                 format=tr["format"],
                 duration_ms=tr["duration_ms"],
                 status=jt["status"],
+                analysis=loads(jt["analysis_json"]),
             )
         )
     return JobTrackListResponse(tracks=out)
@@ -102,7 +103,7 @@ def job_report_json(job_id: str, repo: Repository = Depends(get_repo)) -> dict:
     job = repo.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    cands = [dict(r) for r in repo.list_candidates_for_job(job_id)]
+    cands = [_report_candidate(r) for r in repo.list_candidates_for_job(job_id)]
     return job_report(row_to_dict(job), cands)
 
 
@@ -110,5 +111,5 @@ def job_report_json(job_id: str, repo: Repository = Depends(get_repo)) -> dict:
 def job_export_csv(job_id: str, repo: Repository = Depends(get_repo)) -> str:
     if repo.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="job not found")
-    rows = [dict(r) for r in repo.list_candidates_for_job(job_id)]
+    rows = [_report_candidate(r) for r in repo.list_candidates_for_job(job_id)]
     return candidates_to_csv(rows)

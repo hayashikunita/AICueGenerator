@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
@@ -23,14 +23,19 @@ def init_db(db_path: Path) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(schema_sql)
-        row = conn.execute(
-            "SELECT 1 FROM schema_version WHERE version = ?", (SCHEMA_VERSION,)
-        ).fetchone()
-        if row is None:
+        for version in range(1, SCHEMA_VERSION + 1):
+            if conn.execute("SELECT 1 FROM schema_version WHERE version = ?", (version,)).fetchone():
+                continue
+            if version == 2:
+                migration = (_MIGRATIONS_DIR / "0002_job_analysis.sql").read_text(encoding="utf-8")
+                conn.executescript("BEGIN IMMEDIATE;\n" + migration)
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, datetime.now(timezone.utc).isoformat()),
+                (version, datetime.now(timezone.utc).isoformat()),
             )
-        conn.commit()
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()

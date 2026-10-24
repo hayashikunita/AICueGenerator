@@ -14,9 +14,14 @@ interface CueBase {
 }
 
 // 凡例・設定での表示順。
-export const CUE_ORDER = ["INTRO_END", "BUILD", "DROP", "BREAK", "OUTRO"] as const;
+export const CUE_ORDER = ["INTRO_END", "BUILD", "DROP", "BREAK", "OUTRO", "INTRO_START", "CHORUS_START", "CHORUS_END", "CHORUS_END_MINUS_8_BARS", "VOCAL_START"] as const;
 
 const CUES: Record<string, CueBase> = {
+  INTRO_START: { label: "イントロの始まり", color: "#5b8cff", icon: "▶" },
+  CHORUS_START: { label: "サビの始まり", color: "#ff5d73", icon: "♫" },
+  CHORUS_END: { label: "サビの終わり", color: "#e6b23a", icon: "■" },
+  CHORUS_END_MINUS_8_BARS: { label: "サビ終わり8小節前", color: "#9a7cff", icon: "↤" },
+  VOCAL_START: { label: "歌い始め（要確認）", color: "#3fb6c9", icon: "♪" },
   INTRO_END: { label: "Intro End", color: "#5b8cff", icon: "▶" },
   BUILD: { label: "Build", color: "#e6b23a", icon: "↗" },
   DROP: { label: "Drop", color: "#ff5d73", icon: "⚡" },

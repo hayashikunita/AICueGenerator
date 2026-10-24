@@ -25,7 +25,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const push = useCallback((kind: ToastKind, message: string) => {
     const id = ++seq;
-    setToasts((t) => [...t, { id, kind, message }]);
+    setToasts((t) => [...t.slice(-2), { id, kind, message }]);
     window.setTimeout(() => {
       setToasts((t) => t.filter((x) => x.id !== id));
     }, 4200);
@@ -38,11 +38,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={{ push }}>
       {children}
-      <div className="toast-stack">
+      <div className="toast-stack" aria-label="操作の通知">
         {toasts.map((t) => (
-          <div key={t.id} className={`toast ${t.kind}`} onClick={() => dismiss(t.id)}>
+          <div key={t.id} className={`toast ${t.kind}`} role={t.kind === "error" ? "alert" : "status"}>
             <span className="toast-icon">{icon(t.kind)}</span>
             <span className="toast-msg">{t.message}</span>
+            <button type="button" className="toast-dismiss" aria-label="通知を閉じる" onClick={() => dismiss(t.id)}>×</button>
           </div>
         ))}
       </div>

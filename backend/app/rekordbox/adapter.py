@@ -117,6 +117,9 @@ def open_rekordbox(
         ) from exc
 
     try:
+        # アプリのライブラリ参照は、SQLite 接続でも書き込みを禁止する。
+        from sqlalchemy import text
+        db.session.execute(text("PRAGMA query_only=ON"))
         yield db
     finally:
         try:

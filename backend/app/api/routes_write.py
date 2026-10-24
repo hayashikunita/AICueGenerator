@@ -13,6 +13,7 @@ from ..rekordbox.writer import (
     execute_write_plan,
 )
 from ..domain.enums import WriteAction
+from ..domain.cue_kinds import expand_cue_kind
 from ..rekordbox.xml_export import export_rekordbox_xml
 from ..schemas.jobs import (
     BuildPlanRequest,
@@ -37,14 +38,15 @@ def build_plan(req: BuildPlanRequest, repo: Repository = Depends(get_repo)) -> W
     for r in rows:
         d = dict(r)
         time_ms = d["edited_time_ms"] if d["edited_time_ms"] is not None else d["orig_time_ms"]
-        decisions.append(
-            {
-                "track_id": d["track_id"],
-                "cue_kind": d["cue_kind"],
-                "time_ms": int(time_ms),
-                "slot": d["slot"],
-            }
-        )
+        for kind in expand_cue_kind(d["cue_kind"]):
+            decisions.append(
+                {
+                    "track_id": d["track_id"],
+                    "cue_kind": kind,
+                    "time_ms": int(time_ms),
+                    "slot": d["slot"] if kind == "HOT" else None,
+                }
+            )
     plan = build_write_plan(decisions, existing_by_track={})
     plan_id = repo.create_write_plan(job_id=req.job_id, confirmation_hash=plan.confirmation_hash)
     repo.add_write_plan_items(
@@ -130,7 +132,11 @@ def execute_plan(req: ExecutePlanRequest, repo: Repository = Depends(get_repo)) 
 def export_xml(req: ExportXmlRequest, repo: Repository = Depends(get_repo)) -> ExportXmlResponse:
     if repo.get_job(req.job_id) is None:
         raise HTTPException(status_code=404, detail="job not found")
-    result = export_rekordbox_xml(repo, req.job_id, export_root=get_settings().export_dir)
+    try:
+        result = export_rekordbox_xml(repo, req.job_id, export_root=get_settings().export_dir,
+                                     cue_colors=req.cue_colors.model_dump() if req.cue_colors else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result["tracks"] == 0:
         raise HTTPException(status_code=400, detail="採用キューがありません（書き出し対象なし）")
     repo.add_audit(
@@ -139,7 +145,7 @@ def export_xml(req: ExportXmlRequest, repo: Repository = Depends(get_repo)) -> E
         result="ok",
         target=result["folder"],
         job_id=req.job_id,
-        after={"tracks": result["tracks"], "cues": result["cues"], "copied": result["copied"]},
+        after={"tracks": result["tracks"], "cues": result["cues"], "copied": result["copied"], "cue_colors": result["cue_colors"]},
     )
     return ExportXmlResponse(**result)
 

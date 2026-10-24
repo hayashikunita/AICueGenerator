@@ -7,11 +7,17 @@
 from __future__ import annotations
 
 import threading
+import hashlib
 from pathlib import Path
 from typing import Any
 
 from ..analysis.pipeline import analyze_file
-from ..common import ENGINE_VERSION
+from ..common import ENGINE_VERSION, dumps
+from ..config import get_settings
+from ..domain.enums import BeatSource
+from ..domain.models import BeatGrid, PhraseSection
+from ..rekordbox.adapter import open_rekordbox
+from ..rekordbox.reader import load_track_analysis
 from ..domain.enums import ErrorCode
 from ..domain.events import EventType
 from ..persistence.repositories import Repository
@@ -96,15 +102,46 @@ def _process_track(
     path = str(track["path"])
     bpm = params.get("bpm")
     bars_per_phrase = int(params.get("bars_per_phrase") or 16)
+    beats_per_phrase = params.get("beats_per_phrase")
     top_k = int(params.get("top_k") or 3)
+    source = params.get("analysis_source", "AUDIO")
+    analysis: dict[str, Any] = {"source": source, "available": False, "warnings": []}
+    repo.set_job_track_analysis(job_id, track_id, analysis)
 
     if not Path(path).exists():
+        analysis["reason"] = "音源が見つかりません。rekordbox の登録パスとファイルを確認してください"
+        repo.set_job_track_analysis(job_id, track_id, analysis)
         _fail_track(repo, hub, job_id, track_id, ErrorCode.AUDIO_NOT_FOUND)
         return
 
     try:
-        result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, top_k=top_k)
+        grid = None
+        phrase_boundaries: tuple[int, ...] = ()
+        phrase_sections: tuple[PhraseSection, ...] = ()
+        source_fingerprint = None
+        if source == "REKORDBOX":
+            settings = get_settings()
+            with open_rekordbox(path=settings.rekordbox_db_path, key=settings.rekordbox_key) as db:
+                snapshot = load_track_analysis(db, str(track["content_id"]), path)
+            grid = BeatGrid(snapshot["bpm"], tuple(snapshot["beat_times"]), tuple(snapshot["downbeat_indices"]), BeatSource.ANLZ)
+            phrase_boundaries = tuple(snapshot["phrase_boundaries"])
+            phrase_sections = tuple(PhraseSection(**s) for s in snapshot.get("phrase_sections", []))
+            source_fingerprint = hashlib.sha256(dumps(snapshot).encode("utf-8")).hexdigest()
+            analysis = {k: v for k, v in snapshot.items() if k not in {"beat_times", "downbeat_indices", "phrase_boundaries", "phrase_sections"}}
+            analysis["section_labels_used"] = bool(params.get("cue_targets") and any(s.kind != "UNKNOWN" for s in phrase_sections))
+            analysis["phrase_used"] = bool(phrase_boundaries)
+            repo.set_job_track_analysis(job_id, track_id, analysis)
+        result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, beats_per_phrase=beats_per_phrase, top_k=top_k, beatgrid=grid, phrase_boundaries=phrase_boundaries,
+                              phrase_sections=phrase_sections, cue_targets=params.get("cue_targets"))
+        fingerprint = result.fingerprint
+        if source_fingerprint:
+            fingerprint = "sha256:" + hashlib.sha256((fingerprint + source_fingerprint).encode("ascii")).hexdigest()
+        analysis.update(available=True, bpm=result.beatgrid.bpm, beat_source=result.beatgrid.source.value,
+                        beat_count=result.beatgrid.beat_count, downbeat_count=len(result.beatgrid.downbeat_indices), duration_ms=round(result.duration_sec * 1000))
+        analysis["warnings"] = list(analysis.get("warnings", [])) + list(result.warnings)
     except Exception as exc:  # noqa: BLE001 - 曲単位失敗は継続
+        analysis.update(available=False, reason=str(exc))
+        repo.set_job_track_analysis(job_id, track_id, analysis)
         repo.add_audit(actor="worker", action="analyze", result="error",
                        job_id=job_id, track_id=track_id, after={"error": str(exc)})
         _fail_track(repo, hub, job_id, track_id, ErrorCode.DECODE_FAILED)
@@ -113,11 +150,12 @@ def _process_track(
     cached = repo.find_cached_run(
         track_id=track_id,
         engine_version=ENGINE_VERSION,
-        fingerprint=result.fingerprint,
+        fingerprint=fingerprint,
         params=params,
     )
     if cached is not None:
         run_id = str(cached["id"])
+        repo.set_job_track_analysis(job_id, track_id, analysis, run_id)
         repo.set_job_track_status(job_id, track_id, "COMPLETED")
         repo.bump_job_counts(job_id, completed=1)
         hub.publish(
@@ -137,9 +175,9 @@ def _process_track(
         track_id=track_id,
         engine_version=ENGINE_VERSION,
         params=params,
-        fingerprint=result.fingerprint,
+        fingerprint=fingerprint,
         beat_source=result.beatgrid.source.value,
-        pssi_used=False,
+        pssi_used=bool(phrase_boundaries),
     )
     repo.save_feature_summary(
         run_id,
@@ -149,6 +187,7 @@ def _process_track(
     )
     repo.add_candidates(run_id, [_cue_to_row(c) for c in result.candidates])
     repo.finish_run(run_id, status="COMPLETED")
+    repo.set_job_track_analysis(job_id, track_id, analysis, run_id)
 
     repo.set_job_track_status(job_id, track_id, "COMPLETED")
     repo.bump_job_counts(job_id, completed=1)

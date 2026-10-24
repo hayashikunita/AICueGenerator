@@ -53,6 +53,13 @@ class BeatGrid:
 
 
 @dataclass(frozen=True)
+class PhraseSection:
+    start_beat: int
+    end_beat: int
+    kind: str
+
+
+@dataclass(frozen=True)
 class AnalysisResult:
     """1曲分の解析結果。"""
 

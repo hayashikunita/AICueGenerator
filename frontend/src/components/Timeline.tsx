@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Candidate } from "../types";
 import { fmtTime } from "../cues";
-import { useCueMeta } from "./CueColors";
+import { useCueColors, useCueMeta } from "./CueColors";
+import { CUE_KIND_LABEL, colorText } from "../cueKinds";
+import { CueKindSwatch } from "./CueKindSwatch";
+import { pauseOtherAudio } from "../audio";
 
 // 音源を Web Audio API でデコードして波形ピークを算出するフック。
 function useWaveform(url: string | null | undefined, buckets = 600) {
@@ -87,16 +90,22 @@ function Waveform({ peaks }: { peaks: number[] }) {
 export function Timeline({
   candidates,
   audioUrl,
+  seekRequest,
+  onPositionChange,
 }: {
   candidates: Candidate[];
   audioUrl?: string | null;
+  seekRequest?: { time_ms: number; sequence: number } | null;
+  onPositionChange?: (timeMs: number) => void;
 }) {
   const [hover, setHover] = useState<Candidate | null>(null);
   const cueMeta = useCueMeta();
+  const { kindBackground } = useCueColors();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [audioDurSec, setAudioDurSec] = useState(0);
   const [currentSec, setCurrentSec] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [playError, setPlayError] = useState("");
   const peaks = useWaveform(audioUrl);
 
   // 音源を切り替えたら再生位置をリセットする。
@@ -104,6 +113,7 @@ export function Timeline({
     setCurrentSec(0);
     setPlaying(false);
     setAudioDurSec(0);
+    setPlayError("");
   }, [audioUrl]);
 
   const durationMs = useMemo(() => {
@@ -120,25 +130,40 @@ export function Timeline({
     return out;
   }, [durationMs]);
 
-  if (candidates.length === 0) return null;
+  useEffect(() => {
+    if (!seekRequest || !audioRef.current) return;
+    seekTo(seekRequest.time_ms / 1000);
+    playAudio(audioRef.current);
+    // A new request also replays a cue at the same timestamp.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekRequest]);
 
   const seekTo = (sec: number) => {
     const a = audioRef.current;
     const clamped = Math.max(0, Math.min(sec, durationMs / 1000));
     if (a) a.currentTime = clamped;
     setCurrentSec(clamped);
+    onPositionChange?.(Math.round(clamped * 1000));
   };
 
   const togglePlay = () => {
     const a = audioRef.current;
     if (!a) return;
-    if (a.paused) void a.play();
+    if (a.paused) playAudio(a);
     else a.pause();
+  };
+
+  const playAudio = (audio: HTMLAudioElement) => {
+    setPlayError("");
+    void audio.play().catch((error: unknown) => {
+      if (error instanceof Error && error.name === "AbortError") return;
+      setPlayError("試聴できませんでした。音源の場所や、ブラウザが対応する形式か確認してください。");
+    });
   };
 
   const playCue = (c: Candidate) => {
     seekTo(c.time_ms / 1000);
-    void audioRef.current?.play();
+    if (audioRef.current) playAudio(audioRef.current);
   };
 
   const onTrackClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -150,8 +175,11 @@ export function Timeline({
 
   const playheadPct = Math.min(100, ((currentSec * 1000) / durationMs) * 100);
 
+  if (candidates.length === 0 && !audioUrl) return null;
+
   return (
     <div className="timeline">
+      <div className="cue-kind-legend"><span><CueKindSwatch kind="MEMORY" />Memory Cue</span><span><CueKindSwatch kind="HOT" />Hot Cue</span><span><CueKindSwatch kind="BOTH" />両方</span><span className="muted">採用した候補に反映</span></div>
       {audioUrl && (
         <div className="timeline-transport">
           <button
@@ -188,6 +216,8 @@ export function Timeline({
 
         {candidates.map((c) => {
           const m = cueMeta(c.type);
+          const acceptedKind = c.accepted === true ? c.cue_kind ?? "MEMORY" : null;
+          const background = acceptedKind ? kindBackground(acceptedKind) : m.color;
           const left = (c.time_ms / durationMs) * 100;
           const h = 34 + (c.confidence / 100) * 42;
           return (
@@ -197,8 +227,9 @@ export function Timeline({
               style={{
                 left: `${left}%`,
                 height: `${h}%`,
-                background: m.color,
-                boxShadow: `0 0 10px ${m.glow}`,
+                background,
+                color: acceptedKind === "BOTH" ? "#ffffff" : colorText(background),
+                boxShadow: acceptedKind ? "0 0 0 1px rgba(255,255,255,.45)" : `0 0 10px ${m.glow}`,
               }}
               onClick={(e) => {
                 e.stopPropagation();
@@ -206,9 +237,9 @@ export function Timeline({
               }}
               onMouseEnter={() => setHover(c)}
               onMouseLeave={() => setHover((h2) => (h2?.id === c.id ? null : h2))}
-              aria-label={`${m.label} ${fmtTime(c.time_ms)}`}
+              aria-label={`${m.label} ${fmtTime(c.time_ms)}${acceptedKind ? ` ${CUE_KIND_LABEL[acceptedKind]}` : ""}`}
             >
-              <span className="timeline-marker-icon">{m.icon}</span>
+              <span className="timeline-marker-icon" style={{ color: "inherit" }}>{m.icon}</span>
             </button>
           );
         })}
@@ -223,12 +254,15 @@ export function Timeline({
             const d = e.currentTarget.duration;
             if (Number.isFinite(d) && d > 0) setAudioDurSec(d);
           }}
-          onTimeUpdate={(e) => setCurrentSec(e.currentTarget.currentTime)}
-          onPlay={() => setPlaying(true)}
+          onTimeUpdate={(e) => { setCurrentSec(e.currentTarget.currentTime); onPositionChange?.(Math.round(e.currentTarget.currentTime * 1000)); }}
+          onPlay={(e) => { pauseOtherAudio(e.currentTarget); setPlaying(true); }}
           onPause={() => setPlaying(false)}
           onEnded={() => setPlaying(false)}
+          onError={() => { setPlaying(false); setPlayError("音源を読み込めませんでした。保存場所と音源の形式を確認してください。"); }}
         />
       )}
+
+      {playError && <p className="error" role="alert">{playError}</p>}
 
       {hover && (
         <div className="timeline-tip">
@@ -236,6 +270,7 @@ export function Timeline({
             {cueMeta(hover.type).icon} {cueMeta(hover.type).label}
           </span>
           <span className="mono">{fmtTime(hover.time_ms)}</span>
+          {hover.accepted && <span><CueKindSwatch kind={hover.cue_kind ?? "MEMORY"} />{CUE_KIND_LABEL[hover.cue_kind ?? "MEMORY"]}</span>}
           <span className="muted">信頼度 {hover.confidence}</span>
           <span className={`badge ${hover.band}`}>{hover.band}</span>
         </div>

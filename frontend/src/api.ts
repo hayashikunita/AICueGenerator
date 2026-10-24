@@ -1,5 +1,10 @@
 import type {
   Candidate,
+  AnalysisInfo,
+  GridPreview,
+  GridPlan,
+  CuePosition,
+  CueTarget,
   Diagnostics,
   DecisionRequest,
   ExecuteResult,
@@ -8,6 +13,8 @@ import type {
   JobSummary,
   JobTrack,
   RekordboxSearchResult,
+  RekordboxPlaylistListResult,
+  RekordboxPlaylistTracksResult,
   TrackInput,
   WritePlan,
 } from "./types";
@@ -35,10 +42,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       Authorization: `Bearer ${token}`,
       ...(init?.headers ?? {}),
     },
-  });
+  }).catch(() => { throw new Error("アプリに接続できません。起動していることを確認し、もう一度お試しください。"); });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+    let message = "処理を完了できませんでした。もう一度お試しください。";
+    try {
+      const detail = JSON.parse(body).detail;
+      if (typeof detail === "string") message = detail;
+      else if (Array.isArray(detail)) message = "入力内容を確認して、もう一度お試しください。";
+    } catch { /* A proxy may return HTML instead of an API error. */ }
+    if (res.status === 401) message = "認証が切れています。アプリ起動時のURLから開き直してください。";
+    throw new Error(message);
   }
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
@@ -74,11 +88,36 @@ export const api = {
       `/rekordbox/tracks?query=${encodeURIComponent(query)}&limit=${limit}`,
     ),
 
+  rekordboxPlaylists: () => req<RekordboxPlaylistListResult>("/rekordbox/playlists"),
+
+  rekordboxAnalysis: (id: string, path: string) => req<AnalysisInfo>(`/rekordbox/tracks/${encodeURIComponent(id)}/analysis?path=${encodeURIComponent(path)}`),
+
+  gridPreview: (id: string, path: string) => req<GridPreview>(`/rekordbox/tracks/${encodeURIComponent(id)}/grid?path=${encodeURIComponent(path)}`),
+
+  libraryAudioUrl: (id: string, path: string) => `${BASE}/rekordbox/tracks/${encodeURIComponent(id)}/audio?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`,
+
+  gridPlan: (id: string, path: string, firstBeat: number) => req<GridPlan>(`/rekordbox/tracks/${encodeURIComponent(id)}/grid/plan`, {
+    method: "POST", body: JSON.stringify({ path, first_beat: firstBeat }),
+  }),
+
+  gridApply: (id: string, planId: string) => req<{ ok: boolean; message: string; backup_dir: string }>(`/rekordbox/tracks/${encodeURIComponent(id)}/grid/apply`, {
+    method: "POST", body: JSON.stringify({ plan_id: planId }),
+  }),
+
+  rekordboxPlaylistTracks: (id: string, query = "", offset = 0) =>
+    req<RekordboxPlaylistTracksResult>(`/rekordbox/playlists/${encodeURIComponent(id)}/tracks?query=${encodeURIComponent(query)}&offset=${offset}&limit=50`),
+
   decide: (candidateId: string, body: DecisionRequest) =>
-    req<{ decision_id: string; candidate_id: string }>(
+    req<{ decision_id: string; candidate_id: string; time_ms?: number; beat?: number | null }>(
       `/candidates/${candidateId}/decision`,
       { method: "POST", body: JSON.stringify(body) },
     ),
+
+  previewPosition: (candidateId: string, timeMs: number, snapTo: "BEAT" | "BAR", step = 0) =>
+    req<CuePosition>(`/candidates/${encodeURIComponent(candidateId)}/preview-position`, { method: "POST", body: JSON.stringify({ time_ms: timeMs, snap_to: snapTo, step }) }),
+
+  addManualCandidate: (jobId: string, trackId: string, target: CueTarget, timeMs: number, snapTo: "BEAT" | "BAR") =>
+    req<Candidate>(`/jobs/${encodeURIComponent(jobId)}/candidates/manual`, { method: "POST", body: JSON.stringify({ track_id: trackId, target, time_ms: timeMs, snap_to: snapTo }) }),
 
   buildPlan: (jobId: string) =>
     req<WritePlan>("/write/plan", {
@@ -92,13 +131,22 @@ export const api = {
       body: JSON.stringify({ plan_id: planId, confirmation_hash: confirmationHash }),
     }),
 
-  exportXml: (jobId: string) =>
+  exportXml: (jobId: string, cueColors: Record<"MEMORY" | "HOT", string>) =>
     req<ExportXmlResult>("/write/export-xml", {
       method: "POST",
-      body: JSON.stringify({ job_id: jobId }),
+      body: JSON.stringify({ job_id: jobId, cue_colors: cueColors }),
     }),
 
-  reportCsvUrl: (jobId: string) => `${BASE}/jobs/${jobId}/export.csv`,
+  downloadReport: async (jobId: string) => {
+    const res = await fetch(`${BASE}/jobs/${jobId}/export.csv`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error(`CSV を取得できませんでした (${res.status})`);
+    const url = URL.createObjectURL(await res.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `cue-report-${jobId.slice(0, 8)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
 };
 
 // 進捗 WebSocket。トークンはクエリで渡す（WS はヘッダ制約があるため）。

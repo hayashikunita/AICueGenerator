@@ -129,18 +129,29 @@ class Repository:
 
     def get_job(self, job_id: str) -> sqlite3.Row | None:
         return self._conn.execute(
-            "SELECT * FROM analysis_job WHERE id = ?", (job_id,)
+            "SELECT j.*, (SELECT t.path FROM job_track jt JOIN track_ref t ON t.id=jt.track_id "
+            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_path "
+            "FROM analysis_job j WHERE j.id = ?", (job_id,)
         ).fetchone()
 
     def list_jobs(self, limit: int = 100) -> list[sqlite3.Row]:
         return self._conn.execute(
-            "SELECT * FROM analysis_job ORDER BY created_at DESC LIMIT ?", (limit,)
+            "SELECT j.*, (SELECT t.path FROM job_track jt JOIN track_ref t ON t.id=jt.track_id "
+            "WHERE jt.job_id=j.id ORDER BY t.path LIMIT 1) AS track_path "
+            "FROM analysis_job j ORDER BY j.created_at DESC LIMIT ?", (limit,)
         ).fetchall()
 
     def list_job_tracks(self, job_id: str) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT * FROM job_track WHERE job_id = ?", (job_id,)
         ).fetchall()
+
+    def set_job_track_analysis(self, job_id: str, track_id: str, analysis: dict[str, Any], run_id: str | None = None) -> None:
+        self._conn.execute(
+            "UPDATE job_track SET analysis_json=?, run_id=? WHERE job_id=? AND track_id=?",
+            (dumps(analysis), run_id, job_id, track_id),
+        )
+        self._conn.commit()
 
     # --- analysis_run ------------------------------------------------------
     def find_cached_run(
@@ -206,6 +217,37 @@ class Repository:
         self._conn.commit()
 
     # --- cue_candidate -----------------------------------------------------
+    def get_feature_summary(self, run_id: str) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM feature_summary WHERE run_id=?", (run_id,)).fetchone()
+
+    def add_manual_candidate(self, job_id: str, track_id: str, candidate: dict[str, Any]) -> str:
+        """Fork a completed job's run so manual additions never alter older history."""
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            job = self.get_job(job_id)
+            if job is None or job["status"] != "COMPLETED":
+                raise ValueError("解析完了後に候補を追加してください。")
+            jt = next((r for r in self.list_job_tracks(job_id) if r["track_id"] == track_id), None)
+            if jt is None or not jt["run_id"]:
+                raise ValueError("解析済みの対象曲が見つかりません。")
+            old_run = self._conn.execute("SELECT * FROM analysis_run WHERE id=?", (jt["run_id"],)).fetchone()
+            if old_run is None:
+                raise ValueError("解析結果が見つかりません。")
+            run_id, candidate_id, now = new_id(), new_id(), utcnow_iso()
+            params = loads(old_run["params_json"]) or {}
+            params["manual_revision"] = new_id()
+            self._conn.execute("INSERT INTO analysis_run (id,track_id,engine_version,params_json,audio_fingerprint,beat_source,pssi_used,status,started_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                               (run_id, track_id, old_run["engine_version"], dumps(params), old_run["audio_fingerprint"], old_run["beat_source"], old_run["pssi_used"], "COMPLETED", now, now))
+            self._conn.execute("INSERT INTO feature_summary SELECT ?,bpm,beat_times_json,downbeats_json,bars_json,energy_json,waveform_peaks_json FROM feature_summary WHERE run_id=?", (run_id, old_run["id"]))
+            for original in self._conn.execute("SELECT * FROM cue_candidate WHERE run_id=?", (old_run["id"],)).fetchall():
+                copied_id = new_id()
+                self._conn.execute("INSERT INTO cue_candidate SELECT ?,?,type,time_ms,beat,bar,confidence,rank,evidence_json,? FROM cue_candidate WHERE id=?", (copied_id, run_id, now, original["id"]))
+                self._conn.execute("INSERT INTO cue_decision SELECT ?,?,accepted,edited_time_ms,cue_kind,slot,color,comment,updated_at FROM cue_decision WHERE candidate_id=?", (new_id(), copied_id, original["id"]))
+            rank = self._conn.execute("SELECT COALESCE(MAX(rank),0)+1 FROM cue_candidate WHERE run_id=? AND type=?", (run_id, candidate["type"])).fetchone()[0]
+            self._conn.execute("INSERT INTO cue_candidate (id,run_id,type,time_ms,beat,bar,confidence,rank,evidence_json,created_at) VALUES (?,?,?,?,?,NULL,0,?,?,?)", (candidate_id, run_id, candidate["type"], candidate["time_ms"], candidate["beat"], rank, dumps(candidate["evidence"]), now))
+            self._conn.execute("UPDATE job_track SET run_id=? WHERE job_id=? AND track_id=?", (run_id, job_id, track_id))
+        return candidate_id
+
     def add_candidates(self, run_id: str, candidates: list[dict[str, Any]]) -> list[str]:
         ids: list[str] = []
         now = utcnow_iso()
@@ -237,15 +279,20 @@ class Repository:
 
     def get_candidate(self, candidate_id: str) -> sqlite3.Row | None:
         return self._conn.execute(
-            "SELECT * FROM cue_candidate WHERE id = ?", (candidate_id,)
+            "SELECT c.*, d.accepted, d.cue_kind,d.edited_time_ms,d.slot,d.color,d.comment,fs.beat_times_json FROM cue_candidate c "
+            "LEFT JOIN cue_decision d ON d.candidate_id=c.id LEFT JOIN feature_summary fs ON fs.run_id=c.run_id WHERE c.id = ?", (candidate_id,)
         ).fetchone()
 
     def list_candidates_for_job(self, job_id: str) -> list[sqlite3.Row]:
         return self._conn.execute(
-            "SELECT c.* FROM cue_candidate c "
+            "SELECT c.*, d.accepted, d.cue_kind,d.edited_time_ms,fs.beat_times_json FROM cue_candidate c "
+            "LEFT JOIN cue_decision d ON d.candidate_id=c.id "
             "JOIN analysis_run r ON c.run_id = r.id "
+            "LEFT JOIN feature_summary fs ON fs.run_id=r.id "
             "JOIN job_track jt ON jt.track_id = r.track_id "
-            "WHERE jt.job_id = ? ORDER BY c.type, c.rank",
+            "JOIN analysis_job j ON jt.job_id = j.id "
+            "WHERE jt.job_id = ? AND (jt.run_id = r.id OR "
+            "(jt.run_id IS NULL AND jt.analysis_json IS NULL AND r.params_json = j.params_json)) ORDER BY c.type, c.rank",
             (job_id,),
         ).fetchall()
 
@@ -294,7 +341,9 @@ class Repository:
             "JOIN cue_candidate c ON d.candidate_id = c.id "
             "JOIN analysis_run r ON c.run_id = r.id "
             "JOIN job_track jt ON jt.track_id = r.track_id "
-            "WHERE jt.job_id = ? AND d.accepted = 1",
+            "JOIN analysis_job j ON jt.job_id = j.id "
+            "WHERE jt.job_id = ? AND (jt.run_id = r.id OR "
+            "(jt.run_id IS NULL AND jt.analysis_json IS NULL AND r.params_json = j.params_json)) AND d.accepted = 1",
             (job_id,),
         ).fetchall()
 

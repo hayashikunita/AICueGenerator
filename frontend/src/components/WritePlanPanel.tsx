@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { api } from "../api";
 import { fmtTime } from "../cues";
-import type { ExecuteResult, ExportXmlResult, WritePlan } from "../types";
+import type { ExportXmlResult, WritePlan } from "../types";
 import { useToast } from "./Toast";
+import { useCueColors } from "./CueColors";
+import { CueKindSwatch } from "./CueKindSwatch";
 
 function ActionBadge({ action }: { action: string }) {
   const map: Record<string, string> = {
@@ -11,18 +13,19 @@ function ActionBadge({ action }: { action: string }) {
     REPLACE: "review",
     CONFLICT: "reject",
   };
-  return <span className={`badge ${map[action] ?? "review"}`}>{action}</span>;
+  const labels: Record<string, string> = { ADD: "追加", KEEP: "維持", REPLACE: "置換", CONFLICT: "競合" };
+  return <span className={`badge ${map[action] ?? "review"}`}>{labels[action] ?? action}</span>;
 }
 
-export function WritePlanPanel({ jobId, writable }: { jobId: string; writable: boolean }) {
+export function WritePlanPanel({ jobId, acceptedCount, memoryCount, hotCount, deciding }: { jobId: string; acceptedCount: number; memoryCount: number; hotCount: number; deciding: boolean }) {
   const [plan, setPlan] = useState<WritePlan | null>(null);
-  const [result, setResult] = useState<ExecuteResult | null>(null);
   const [xmlResult, setXmlResult] = useState<ExportXmlResult | null>(null);
   const [busy, setBusy] = useState(false);
   const toast = useToast();
+  const { kindColor } = useCueColors();
 
   const build = async () => {
-    setResult(null);
+    setPlan(null);
     setBusy(true);
     try {
       const p = await api.buildPlan(jobId);
@@ -35,25 +38,10 @@ export function WritePlanPanel({ jobId, writable }: { jobId: string; writable: b
     }
   };
 
-  const execute = async () => {
-    if (!plan) return;
-    setBusy(true);
-    try {
-      const r = await api.executePlan(plan.plan_id, plan.confirmation_hash);
-      setResult(r);
-      if (r.ok) toast.push("success", `rekordbox へ書き込み成功: ${r.written} 件`);
-      else toast.push("error", `書き込み拒否 (${r.error_code})`);
-    } catch (e) {
-      toast.push("error", `実行失敗: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const exportXml = async () => {
     setBusy(true);
     try {
-      const r = await api.exportXml(jobId);
+      const r = await api.exportXml(jobId, { MEMORY: kindColor("MEMORY"), HOT: kindColor("HOT") });
       setXmlResult(r);
       toast.push(
         "success",
@@ -68,23 +56,18 @@ export function WritePlanPanel({ jobId, writable }: { jobId: string; writable: b
 
   return (
     <div className="panel">
-      <h2>書き込みプラン</h2>
+      <h2>3. 採用したキューを書き出す</h2>
+      <p className="field-help">{acceptedCount === 0 ? "上の候補を「Memory Cue」「Hot Cue」「両方」で採用すると、書き出せます。" : `Memory Cue ${memoryCount} 件・Hot Cue ${hotCount} 件、合計 ${memoryCount + hotCount} キューを書き出します。「両方」の候補は各 1 件ずつ含まれます。`}</p>
+      {hotCount > 8 && <p className="field-help">Hot Cue の XML 出力は 1 曲につき A〜H の 8 件までです。超える場合は、使い分けて Memory Cue に変更してください。</p>}
+      <div className="cue-kind-legend" aria-label="XMLに書き出すCueの色"><span><CueKindSwatch kind="MEMORY" />Memory Cue</span><span><CueKindSwatch kind="HOT" />Hot Cue</span></div>
+      <p className="field-help">「キュー色設定」の色を、次に書き出す採用Cueへ適用します。Memory Cueの色がrekordboxで反映されるかは未確認です。</p>
       <div className="row">
-        <button className="secondary" disabled={busy} onClick={build}>
-          採用キューからプラン作成
+        <button className="secondary" disabled={busy || deciding || acceptedCount === 0} onClick={build}>
+          書き出すキューを確認
         </button>
-        <button className="secondary" disabled={busy} onClick={exportXml}>
+        <button disabled={busy || deciding || acceptedCount === 0} onClick={exportXml}>
           📁 rekordbox XML を書き出し
         </button>
-        {plan && (
-          <button
-            className="danger"
-            disabled={busy || !writable || plan.conflict > 0}
-            onClick={execute}
-          >
-            🎧 rekordbox へ書き込み
-          </button>
-        )}
       </div>
 
       {plan && (
@@ -104,21 +87,10 @@ export function WritePlanPanel({ jobId, writable }: { jobId: string; writable: b
               </div>
               <div className="stat-label">競合</div>
             </div>
-            <div className="stat">
-              <div className="stat-val mono" style={{ fontSize: 13 }}>
-                {plan.confirmation_hash.slice(0, 10)}…
-              </div>
-              <div className="stat-label">確認ハッシュ</div>
-            </div>
           </div>
 
-          {!writable && (
-            <p className="error">
-              書込ロック中（rekordbox 起動中・スキーマ未対応・容量不足のいずれか）。実行はフェイルクローズで拒否されます。
-            </p>
-          )}
-
-          <table style={{ marginTop: 6 }}>
+          {plan.conflict > 0 && <p className="error">採用候補に同じ種別・位置の重複があります。採用する候補を変更して内容を再確認してください。</p>}
+          <div className="table-scroll" tabIndex={0} role="region" aria-label="書き込み内容"><table style={{ marginTop: 6 }}>
             <thead>
               <tr>
                 <th>トラック</th>
@@ -133,7 +105,7 @@ export function WritePlanPanel({ jobId, writable }: { jobId: string; writable: b
                 return (
                   <tr key={idx}>
                     <td className="mono muted">{i.track_id.slice(0, 10)}…</td>
-                    <td>{i.cue_kind}</td>
+                    <td><CueKindSwatch kind={i.cue_kind === "HOT" ? "HOT" : "MEMORY"} />{i.cue_kind === "HOT" ? "Hot Cue" : "Memory Cue"}</td>
                     <td><ActionBadge action={i.action} /></td>
                     <td className="mono">{fmtTime(i.time_ms)}</td>
                     <td className="muted" style={{ fontSize: 12 }}>{i.reason}</td>
@@ -141,13 +113,17 @@ export function WritePlanPanel({ jobId, writable }: { jobId: string; writable: b
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         </>
       )}
+
+      {busy && <p className="field-help" role="status">処理しています…</p>}
 
       {xmlResult && (
         <div className="log" style={{ marginTop: 12 }}>
           <div>✓ rekordbox XML を書き出しました（楽曲 {xmlResult.tracks} ・キュー {xmlResult.cues} ・複製 {xmlResult.copied}）</div>
+          {xmlResult.cue_colors && <p className="field-help">書き出した色：Memory Cue {xmlResult.cue_colors.MEMORY ?? "未指定"} ／ Hot Cue {xmlResult.cue_colors.HOT ?? "未指定"}</p>}
+          {xmlResult.warnings?.map((warning) => <p key={warning} className="field-help">{warning}</p>)}
           <div className="mono muted" style={{ fontSize: 12, marginTop: 6, wordBreak: "break-all" }}>
             {xmlResult.folder}
           </div>
@@ -164,13 +140,6 @@ export function WritePlanPanel({ jobId, writable }: { jobId: string; writable: b
         </div>
       )}
 
-      {result && (
-        <div className={result.ok ? "log" : "error"} style={{ marginTop: 12 }}>
-          {result.ok
-            ? `✓ 書き込み成功: ${result.written} 件`
-            : `✕ 拒否 (${result.error_code}): ${result.message}`}
-        </div>
-      )}
     </div>
   );
 }
