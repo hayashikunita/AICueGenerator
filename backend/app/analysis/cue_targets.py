@@ -154,7 +154,7 @@ def target_candidates(
         elif target == "VOCAL_START":
             if vocal_start is not None and 0 <= vocal_start <= times[-1]:
                 beat = int(np.argmin(np.abs(times - vocal_start)))
-                if vocal_start_source == "DEMUCS":
+                if vocal_start_source.startswith("DEMUCS"):
                     detail = f"HTDemucsで分離したボーカル成分から、短い単発音と弱い分離漏れを除き、継続する声の開始 {vocal_start:.3f}秒を最寄りの拍 {times[beat]:.3f}秒へ合わせた候補（差 {times[beat] - vocal_start:+.3f}秒）。歌詞認識ではなく、長い掛け声・話し声を含む可能性があるため試聴してください。"
                     add(target, beat, 65, detail, aligned=False)
                 else:

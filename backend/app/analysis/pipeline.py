@@ -84,7 +84,7 @@ def analyze_waveform(
             grid = uniform_beatgrid(128.0, duration, beats_per_bar=beats_per_bar)
 
     feat = extract_features(y, sr, grid.beat_times)
-    if stem_analysis is not None:
+    if stem_analysis is not None and stem_analysis.get("scope") != "VOCAL":
         frame_times = np.arange(len(stem_analysis["mix"])) * stem_analysis["hop_sec"]
         vocal = np.asarray(stem_analysis["stems"]["vocals"])
         mix = np.asarray(stem_analysis["mix"])
@@ -177,6 +177,8 @@ def analyze_file(
     if vocal_start is None and stem_analysis is not None and cue_targets and "VOCAL_START" in cue_targets:
         vocal_start = vocal_start_from_stems(stem_analysis)
         vocal_source = "DEMUCS"
+        if stem_analysis.get("scope") == "VOCAL":
+            vocal_source = "DEMUCS_VOCAL"
         if vocal_start is None:
             lyric_warnings.append("分離したボーカルから継続する開始位置を特定できませんでした。" + ("歌い始めの候補は省略します。" if intro_outro is not None else "Verse先頭がある場合は仮候補として表示します。"))
     if stem_analysis is not None:

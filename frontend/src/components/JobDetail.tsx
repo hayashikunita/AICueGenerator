@@ -174,7 +174,7 @@ export function JobDetail({
             <h3 className="result-title">{job ? job.total > 1 ? `${job.total}曲の一括解析` : trackName(job.track_path, job.track_title, job.track_artist) : "読み込み中…"}</h3>
             <div className="muted" style={{ fontSize: 12 }}>{job ? jobDate(job.created_at) : ""}</div>
             {job?.params && job.params.cue_mode !== "INTRO_OUTRO" && <p className="field-help">解析単位：{job.params.beats_per_phrase ?? (job.params.bars_per_phrase ?? 16) * 4} Beat（{(job.params.beats_per_phrase ?? (job.params.bars_per_phrase ?? 16) * 4) / 4} 小節）</p>}
-            {job?.params?.analysis_quality === "AI" && <p className="field-help">判定方法：AI補助（PC内で音源分離）</p>}
+            {job?.params?.analysis_quality === "AI" && <p className="field-help">判定方法：AI補助（{job.params.ai_scope === "VOCAL" ? "ボーカルの開始を検出" : "PC内で音源分離"}）</p>}
             {!!job?.params?.cue_targets?.length && <p className="field-help">指定位置：{job.params.cue_targets.map((target) => CUE_TARGETS.find((option) => option.value === target)?.label ?? target).join("・")}</p>}
             {job?.params?.cue_mode === "INTRO_OUTRO" && job.params.intro_outro && <p className="field-help">イントロアウトロ特化：{job.params.intro_outro.targets.map((target) => introOutroLabel(target, job.params!.intro_outro!)).join("・")}</p>}
           </div>

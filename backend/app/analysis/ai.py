@@ -14,6 +14,7 @@ from .fingerprint import audio_fingerprint
 from .ai_progress import inference_progress
 
 AI_REVISION = "htdemucs-envelopes-1"
+VOCAL_REVISION = "htdemucs-vocal-scan-1"
 _INFERENCE_LOCK = threading.Lock()  # Never load two separators on this PC at once.
 
 
@@ -34,7 +35,7 @@ def ai_status() -> dict:
     except (OSError, ValueError):
         prepared = {}
     available = executable.is_file() and prepared.get("prepared") is True and prepared.get("model") == "htdemucs"
-    return {"available": available, "model": "htdemucs", "local_only": True,
+    return {"available": available, "model": "htdemucs", "local_only": True, "vocal_scan": True,
             "reason": None if available else "AI解析環境・モデルが未準備です。通常解析はそのまま使えます。"}
 
 
@@ -44,30 +45,40 @@ def _cancelled(event) -> bool:
 
 def validate_stems(data: dict) -> dict:
     import math
-    if data.get("schema") != 1 or data.get("model") != "htdemucs":
+    schema = data.get("schema")
+    if schema not in (1, 2) or data.get("model") != "htdemucs":
         raise ValueError("AI解析結果の形式を確認できません。")
     hop, duration = data.get("hop_sec", 0), data.get("duration_sec", 0)
     if not isinstance(hop, (int, float)) or not math.isfinite(hop) or not .01 <= hop <= .5 or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
         raise ValueError("AI解析結果の時間情報が不正です。")
-    arrays = [data.get("mix"), *(data.get("stems", {}).get(key) for key in ("vocals", "drums", "bass", "other"))]
-    expected = math.ceil(duration / hop)
+    coverage = duration
+    if schema == 2:
+        coverage = data.get("analyzed_sec", 0)
+        if (data.get("scope") != "VOCAL" or not isinstance(coverage, (int, float)) or not math.isfinite(coverage)
+                or not 0 < coverage <= duration or type(data.get("scan_complete")) is not bool
+                or data["scan_complete"] != (coverage == duration)):
+            raise ValueError("ボーカル解析範囲が不正です。")
+    keys = ("vocals",) if schema == 2 else ("vocals", "drums", "bass", "other")
+    arrays = [data.get("mix"), *(data.get("stems", {}).get(key) for key in keys)]
+    expected = math.ceil(coverage / hop)
     if any(not isinstance(values, list) or len(values) != expected or any(not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in values) for values in arrays):
         raise ValueError("AI解析結果の音量データが不正です。")
     return data
 
 
-def analyze_stems(path: str, *, cancel_event=None, progress_callback=None) -> tuple[dict, bool]:
+def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal_only: bool = False) -> tuple[dict, bool]:
     if not ai_status()["available"]:
         raise ValueError("AI解析環境・モデルが未準備です。通常解析を選ぶか、AI環境を準備してください。")
     original_fingerprint = audio_fingerprint(path)
-    key = hashlib.sha256((AI_REVISION + original_fingerprint).encode()).hexdigest()
+    key = hashlib.sha256(((VOCAL_REVISION if vocal_only else AI_REVISION) + original_fingerprint).encode()).hexdigest()
     cache = get_settings().data_dir / "ai-cache"
     cache.mkdir(parents=True, exist_ok=True)
     output = cache / f"{key}.json"
 
     def cached():
         try:
-            return validate_stems(json.loads(output.read_text(encoding="utf-8")))
+            data = validate_stems(json.loads(output.read_text(encoding="utf-8")))
+            return data if data["schema"] == (2 if vocal_only else 1) else None
         except (OSError, ValueError, TypeError, AttributeError):
             return None
 
@@ -89,6 +100,17 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None) -> tu
         if _cancelled(cancel_event):
             raise AnalysisCancelled()
         data = cached()
+        if data is None and vocal_only:
+            # Previously completed full-song analysis already contains the voice.
+            # Reuse it without running the model again, discarding other stems.
+            full_key = hashlib.sha256((AI_REVISION + original_fingerprint).encode()).hexdigest()
+            try:
+                full = validate_stems(json.loads((cache / f"{full_key}.json").read_text(encoding="utf-8")))
+                if full["schema"] == 1:
+                    data = {**full, "schema": 2, "scope": "VOCAL", "analyzed_sec": full["duration_sec"],
+                            "scan_complete": True, "stems": {"vocals": full["stems"]["vocals"]}}
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         if data is not None:
             notify({"phase": "CACHED", "percent": 100, "elapsed_sec": 0, "remaining_sec": 0})
             return data, True
@@ -98,7 +120,7 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None) -> tu
         environment = {**os.environ, "TORCH_HOME": str(models), "OMP_NUM_THREADS": "4"}
         # shell=False keeps arbitrary audio filenames out of shell syntax.
         with log.open("w", encoding="utf-8") as stream:
-            process = subprocess.Popen([str(executable), "-u", str(worker), "--audio", path, "--output", str(output), "--model-dir", str(models)],
+            process = subprocess.Popen([str(executable), "-u", str(worker), "--audio", path, "--output", str(output), "--model-dir", str(models)] + (["--vocal-only"] if vocal_only else []),
                                        stdout=stream, stderr=stream, env=environment,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             started = time.monotonic()

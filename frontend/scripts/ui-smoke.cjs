@@ -15,6 +15,7 @@ let lastExport = null, lastPlan = null, memoryOverflowFixture = false;
 let metadataTrack = null;
 let existingConflict=false, existingRace=false, sourceUploads=0, existingExports=0;
 let aiAvailable=true;
+let vocalScanAvailable=true;
 let aiProgressPercent=34;
 function existingReview(data) {
   const tid='purpose-track';
@@ -72,7 +73,7 @@ const server = http.createServer(async (req, res) => {
   }
   let result;
   if (url.pathname.endsWith('/diagnostics')) result = { process_running: false, db_key_available: true, schema_supported: true, writable: ++diag > 1, state: 'ok' };
-  else if (url.pathname.endsWith('/analysis/ai-status')) result={available:aiAvailable,model:'htdemucs',local_only:true,reason:aiAvailable?null:'AI解析環境が未準備です。通常解析を使用できます。'};
+  else if (url.pathname.endsWith('/analysis/ai-status')) result={available:aiAvailable,model:'htdemucs',local_only:true,vocal_scan:vocalScanAvailable,reason:aiAvailable?null:'AI解析環境が未準備です。通常解析を使用できます。'};
   else if(url.pathname==='/api/v1/write/source-xml'&&req.method==='POST') {
     if(data.xml_text.includes('pyrekordbox')) {res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({detail:'アプリの出力XMLではなく、rekordboxのコレクションXMLを選んでください。'}));return;}
     sourceUploads++;result={source_id:'b'.repeat(32),filename:data.filename,tracks:1288};
@@ -139,8 +140,9 @@ const server = http.createServer(async (req, res) => {
   else if (url.pathname.endsWith('/grid')) result = gridPreview(1);
   else if (batchMode && url.pathname.endsWith('/write/export-xml')) {lastExport=data;result={folder:'C:/AppData/exports/test-batch',xml_path:'C:/AppData/exports/test-batch/rekordbox.xml',tracks:batchTracks.length,cues:xmlEntries(data).length,copied:batchTracks.length,skipped:[],cue_colors:data.cue_colors,warnings:[]};}
   else if (url.pathname === '/api/v1/jobs/ai-progress/tracks') result = {tracks:[{id:'ai-progress-track',content_id:'AI1',path:'C:/Music/Long song.wav',title:'Long song',format:'WAV',status:jobs.find(j=>j.id==='ai-progress').status==='RUNNING'?'RUNNING':'COMPLETED',duration_ms:440000,
-    analysis:{source:'REKORDBOX',available:false,analysis_quality:'AI',ai_started_at:new Date(Date.now()-103000).toISOString(),stage:'AIで音源を分離しています。',
-      ai_progress:{phase:'SEPARATING',percent:aiProgressPercent,elapsed_sec:103,remaining_sec:197}}}]};
+    analysis:{source:'REKORDBOX',available:false,analysis_quality:'AI',ai_scope:jobs.find(j=>j.id==='ai-progress').params.ai_scope??'FULL',ai_started_at:new Date(Date.now()-103000).toISOString(),stage:'AIで音源を分離しています。',
+      ai_progress:{phase:'SEPARATING',percent:aiProgressPercent,elapsed_sec:103,remaining_sec:197,
+        ...(jobs.find(j=>j.id==='ai-progress').params.ai_scope==='VOCAL'?{scope:'VOCAL',scan_start_sec:0,scan_end_sec:30,audio_duration_sec:440}:{})}}}]};
   else if (url.pathname === '/api/v1/jobs/metadata/tracks') result = {tracks:[metadataTrack]};
   else if (batchMode && url.pathname.endsWith('/tracks') && !url.pathname.includes('rekordbox')) result = {tracks:batchTracks};
   else if (url.pathname.endsWith('/analysis') && url.pathname.includes('/rekordbox/tracks/')) {
@@ -186,7 +188,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ws.addEventListener('message', ({ data }) => { const msg=JSON.parse(data); if (msg.id) { const p=pending.get(msg.id); pending.delete(msg.id); if (msg.error) p.reject(Error(JSON.stringify(msg.error))); else p.resolve(msg.result); } if (msg.method==='Runtime.exceptionThrown') errors.push(msg.params.exceptionDetails.text); });
     const call = (method, params={}) => new Promise((resolve,reject) => { const id=++seq; pending.set(id,{resolve,reject}); ws.send(JSON.stringify({id,method,params})); });
     const evaluate = async expression => { const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true}); if(r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result.value; };
-    const until = async expression => { for(let i=0;i<60;i++) { if(await evaluate(`Boolean(${expression})`)) return; await sleep(100); } const state=await evaluate("Array.from(document.querySelectorAll('audio')).map(a=>({src:a.src,time:a.currentTime,paused:a.paused,ready:a.readyState,error:a.error?.message}))");throw Error(`Timed out: ${expression}\nAudio: ${JSON.stringify(state)}\nRuntime: ${JSON.stringify(errors)}`); };
+    const until = async expression => { for(let i=0;i<60;i++) { if(await evaluate(`Boolean(${expression})`)) return; await sleep(100); } const state=await evaluate("Array.from(document.querySelectorAll('audio')).map(a=>({src:a.src,time:a.currentTime,paused:a.paused,ready:a.readyState,error:a.error?.message}))");const panels=await evaluate("Array.from(document.querySelectorAll('.analysis-source-info')).map(e=>e.textContent)");throw Error(`Timed out: ${expression}\nAudio: ${JSON.stringify(state)}\nPanels: ${JSON.stringify(panels)}\nRuntime: ${JSON.stringify(errors)}`); };
     const click = label => evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(label)}).click()`);
     const tap = async selector => {
       const rect=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.scrollIntoView({block:'center',inline:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
@@ -232,7 +234,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("document.querySelector('.result-title')?.textContent==='First song.wav'");
     assert.equal(created.tracks[0].path,'C:\\Music\\Quoted song.wav');
     assert.equal(created.params.bpm,null);
-    assert.equal(created.params.analysis_quality,'AI');
+    assert.equal(created.params.analysis_quality,'STANDARD');
+    assert.equal(created.params.ai_scope,'VOCAL');
     assert.equal(created.params.beats_per_phrase,4);
     assert.equal(created.params.bars_per_phrase,undefined);
     await until("document.querySelector('#analysis-result').textContent.includes('解析単位：4 Beat（1 小節）')");
@@ -869,12 +872,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("document.querySelector('.candidate-type-cell')?.textContent.includes('歌い始め')");
     assert.equal(created.params.analysis_quality,'AI');
     assert.equal(created.params.cue_mode,'INTRO_OUTRO');
+    assert.equal(created.params.ai_scope,'VOCAL');
+    assert.equal(await evaluate("document.querySelector('#analysis-quality-help').textContent.includes('先頭から30秒ずつ')"),true);
     assert.deepEqual(created.params.intro_outro.targets,['VOCAL_START']);
     assert.equal(created.params.cue_settings.VOCAL_START.cue_kind,'HOT');
     assert.equal(created.params.cue_settings.VOCAL_START.hot_color,'#00ff00');
     assert.equal(decisionWrites,writesBeforeVocal);
     assert.equal(candidates.length,1);
     assert.equal(candidates[0].accepted,null);
+    vocalScanAvailable=false;
+    await call('Page.reload');
+    await until("document.querySelector('#analysis-quality')?.value==='AI'");
+    await click('イントロアウトロ特化');
+    await click('ファイルパスから');
+    await input('audio-path','C:\\Music\\Requires-restart.wav');
+    const beforeUnsupported=created;
+    await click('解析を開始 →');
+    await until("document.querySelector('.new-job .error')?.textContent.includes('アプリの再起動が必要') || document.body.textContent.includes('ボーカルの段階解析を利用するにはアプリの再起動が必要')");
+    assert.equal(created,beforeUnsupported,'old backend must not silently run full-song separation');
+    vocalScanAvailable=true;
     jobs.unshift({id:'ai-progress',status:'RUNNING',total:46,completed:0,failed:0,track_path:'C:/Music/Long song.wav',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),params:{analysis_quality:'AI'}});
     await call('Page.reload');
     await until("document.querySelectorAll('.job').length>0");
@@ -885,6 +901,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.equal(await evaluate("document.querySelector('.analysis-progress-info').textContent.includes('残り約 3:17')"),true);
     aiProgressPercent=67;
     await until("document.querySelector('progress[aria-label=\"この曲の音源分離\"]')?.value===67");
+    jobs[0].params.ai_scope='VOCAL';
+    await until("document.querySelector('.analysis-progress-info')?.textContent.includes('この区間のボーカル分離：67%') && document.querySelector('.analysis-progress-info')?.textContent.includes('確認範囲 0:00〜0:30')");
     for(const width of [1440,390]) {
       await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
       await evaluate("document.querySelector('.analysis-progress-info').scrollIntoView()");

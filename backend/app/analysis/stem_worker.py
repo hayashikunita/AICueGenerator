@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--vocal-only", action="store_true")
     args = parser.parse_args()
     os.environ["TORCH_HOME"] = args.model_dir
     import numpy as np
@@ -38,6 +39,53 @@ def main() -> None:
         return
     if not args.audio:
         parser.error("--audio is required unless --prepare is selected")
+    if args.vocal_only:
+        from vocal_scan import scan_vocals
+        info = sf.info(args.audio)
+        if info.frames <= 0 or info.samplerate <= 0:
+            raise ValueError("Empty audio")
+
+        def separate(start, end):
+            # Include context on both sides, keeping only the core envelopes.
+            # The file and model stay open across windows; no stem audio is saved.
+            audio_start = max(0, start - 3)
+            audio_end = min(info.duration, end + 3)
+            block, source_sr = sf.read(args.audio, start=round(audio_start * info.samplerate),
+                stop=round(audio_end * info.samplerate), dtype="float32", always_2d=True)
+            if not len(block) or not np.all(np.isfinite(block)):
+                raise ValueError("Invalid audio samples")
+            wav = torch.from_numpy(block.T.copy())
+            wav = wav.repeat(2, 1) if wav.shape[0] == 1 else wav[:2]
+            if source_sr != model.samplerate:
+                wav = julius.resample_frac(wav, source_sr, model.samplerate)
+            reference = wav.mean(dim=0)
+            mean, scale = reference.mean(), reference.std()
+            if not torch.isfinite(scale) or scale < 1e-8:
+                voice = torch.zeros_like(wav)
+            else:
+                with torch.inference_mode():
+                    separated = apply_model(model, ((wav - mean) / scale)[None], device="cpu", shifts=1,
+                        overlap=.25, split=True, progress=True, num_workers=0)[0]
+                voice = separated[model.sources.index("vocals")] * scale
+                del separated
+            offset = round((start - audio_start) * model.samplerate)
+            length = round((end - start) * model.samplerate)
+            hop = round(model.samplerate * .1)
+            count = int(np.ceil(end / .1)) - round(start / .1)
+
+            def core_envelope(signal):
+                core = signal[..., offset:offset + length]
+                padded = torch.nn.functional.pad(core, (0, count * hop - core.shape[-1]))
+                return torch.sqrt(padded.reshape(-1, count, hop).square().mean(dim=(0, 2))).tolist()
+
+            return core_envelope(wav), core_envelope(voice)
+
+        result = scan_vocals(info.duration, separate,
+            on_window=lambda progress: print("AICUE_SCAN " + json.dumps(progress), flush=True))
+        temporary = output.with_suffix(".tmp")
+        temporary.write_text(json.dumps(result, allow_nan=False), encoding="utf-8")
+        temporary.replace(output)
+        return
     data, sr = sf.read(args.audio, dtype="float32", always_2d=True)
     if not len(data) or not np.all(np.isfinite(data)):
         raise ValueError("The audio is empty or contains non-finite samples")

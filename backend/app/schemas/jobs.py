@@ -41,6 +41,7 @@ class JobParams(BaseModel):
     intro_outro: IntroOutroSettings | None = None
     analysis_source: Literal["REKORDBOX", "AUDIO"] = "AUDIO"
     analysis_quality: Literal["STANDARD", "AI"] = "STANDARD"
+    ai_scope: Literal["FULL", "VOCAL"] = "FULL"
     bpm: float | None = Field(default=None, gt=0, description="既知BPM。未指定なら推定")
     bars_per_phrase: int = Field(default=16, ge=1, le=128)
     beats_per_phrase: int | None = Field(default=None, ge=4, le=512, multiple_of=4, description="4/4拍子の解析単位。指定時は小節数より優先")
@@ -58,6 +59,9 @@ class JobParams(BaseModel):
             if "VOCAL_START" not in self.intro_outro.targets:
                 self.analysis_quality = "STANDARD"  # Separation is only useful when requested.
             self.cue_targets = None
+        targets = self.intro_outro.targets if self.cue_mode == "INTRO_OUTRO" else self.cue_targets or []
+        if self.ai_scope == "VOCAL" and "VOCAL_START" not in targets:
+            self.analysis_quality = "STANDARD"
         return self
 
 

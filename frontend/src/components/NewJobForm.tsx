@@ -174,6 +174,10 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
     event.preventDefault();
     if (busy) return;
     if (missingTargets) { setError("作りたいCueの位置を1つ以上選んでください。"); return; }
+    if (analysisQuality === "AI" && (specializedVocal || targetMode && cueTargets.includes("VOCAL_START")) && !aiStatus?.vocal_scan) {
+      setError("ボーカルの段階解析を利用するにはアプリの再起動が必要です。実行中の解析を終了してから更新を反映してください。");
+      return;
+    }
     if (invalidBars) { setError("小節数は1〜128の整数で入力してください。"); return; }
     if (batchMode ? !batchReady : analysisSource === "REKORDBOX" && (checkingAnalysis || !analysis?.available)) {
       setError("rekordbox の解析済みグリッドを確認してから開始してください。");
@@ -194,7 +198,8 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
       const { job_id } = await api.createJob(
         {
           analysis_source: analysisSource,
-          analysis_quality: specialized && !specializedVocal ? "STANDARD" : analysisQuality,
+          analysis_quality: analysisQuality === "AI" && (specializedVocal || targetMode && cueTargets.includes("VOCAL_START")) ? "AI" : "STANDARD",
+          ai_scope: "VOCAL",
           cue_mode: cueMode,
           ...(specialized ? { intro_outro: introOutro, cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => introOutro.targets.includes(target as CueTarget))) } : {}),
           bpm: batchMode ? null : analysisSource === "REKORDBOX" ? analysis?.bpm ?? null : bpm.trim() ? Number(bpm) : null,
@@ -310,10 +315,10 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
             setAnalysisQuality(next);
             try { localStorage.setItem("aicue.analysisQuality", next); } catch { /* Optional preference. */ }
           }} aria-describedby="analysis-quality-help">
-            <option value="AI" disabled={!aiStatus?.available}>AI補助（推奨・時間がかかります）</option>
+            <option value="AI" disabled={!aiStatus?.available}>AI補助（ボーカルの開始を検出）</option>
             <option value="STANDARD">通常（フレーズ・音色・和音の変化を照合）</option>
           </select>
-          <p id="analysis-quality-help" className="field-help">{analysisQuality === "AI" ? "PC内でボーカルなどを分離し、歌い始めや曲構造の判定材料に加えます。初回はCPU処理で時間がかかり、同じ音源の分離結果は再利用します。拍位置・小節頭は選んだ解析の基準を使います。" : specializedVocal ? "歌い始めは同名LRCの歌詞時刻から探します。歌詞時刻がない場合は省略するため、声を検出するにはAI補助を選んでください。" : "フレーズ情報と音量・音色・和音の変化、離れた区間の繰り返しから候補を評価します。歌い始めはLRC、なければVerseの仮候補です。"}</p>
+          <p id="analysis-quality-help" className="field-help">{analysisQuality === "AI" ? "歌い始めを選ぶと、PC内で先頭から30秒ずつボーカルを確認します。継続する声を確認できたら残りの分離を省略し、見つからなければ曲末まで調べます。歌い始めが未選択なら音源分離を行いません。拍位置・小節頭は選んだ解析の基準を使います。" : specializedVocal ? "歌い始めは同名LRCの歌詞時刻から探します。歌詞時刻がない場合は省略するため、声を検出するにはAI補助を選んでください。" : "フレーズ情報と音量・音色・和音の変化、離れた区間の繰り返しから候補を評価します。歌い始めはLRC、なければVerseの仮候補です。"}</p>
           {aiStatus && !aiStatus.available && <p className="field-help">{aiStatus.reason}</p>}
           </div>
           <div hidden={specialized}>

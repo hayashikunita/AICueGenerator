@@ -152,7 +152,9 @@ def _process_track(
                 repo.set_job_track_analysis(job_id, track_id, analysis)
                 hub.publish(job_id, EventType.JOB_PROGRESS, {"track_id": track_id, "ai_progress": progress})
 
-            stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed)
+            vocal_only = params.get("ai_scope") == "VOCAL"
+            analysis["ai_scope"] = "VOCAL" if vocal_only else "FULL"
+            stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed, vocal_only=vocal_only)
             if source == "REKORDBOX":
                 with open_rekordbox(path=settings.rekordbox_db_path, key=settings.rekordbox_key) as db:
                     latest_snapshot = load_track_analysis(db, str(track["content_id"]), path)
@@ -160,6 +162,8 @@ def _process_track(
                     raise ValueError("AI処理中にrekordboxのグリッド・フレーズ・Cue情報が変わりました。解析情報を再取得して実行し直してください。")
             analysis.update(ai_model=stems["model"], ai_cached=cached_stems,
                             vocal_start_sec=vocal_start_from_stems(stems), stage="音色・和音・ボーカルとフレーズを照合しています…")
+            if stems.get("scope") == "VOCAL":
+                analysis.update(vocal_analyzed_sec=stems["analyzed_sec"], vocal_scan_complete=stems["scan_complete"])
             repo.set_job_track_analysis(job_id, track_id, analysis)
         result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, beats_per_phrase=beats_per_phrase, top_k=top_k, beatgrid=grid, phrase_boundaries=phrase_boundaries,
                               phrase_sections=phrase_sections, cue_targets=params.get("cue_targets"), end_alignment_bars=params.get("end_alignment_bars", 1),

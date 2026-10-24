@@ -33,6 +33,7 @@ export interface JobParams {
   intro_outro?: IntroOutroSettings | null;
   analysis_source?: "REKORDBOX" | "AUDIO";
   analysis_quality?: "STANDARD" | "AI";
+  ai_scope?: "FULL" | "VOCAL";
   bpm?: number | null;
   bars_per_phrase?: number;
   beats_per_phrase?: number | null;
@@ -118,8 +119,11 @@ export interface JobTrack {
 }
 
 export interface AnalysisInfo {
+  ai_scope?: "FULL" | "VOCAL";
+  vocal_analyzed_sec?: number;
+  vocal_scan_complete?: boolean;
   ai_started_at?: string;
-  ai_progress?: { phase: "WAITING" | "PREPARING" | "SEPARATING" | "FINALIZING" | "CACHED"; percent: number | null; elapsed_sec: number; remaining_sec: number | null };
+  ai_progress?: { phase: "WAITING" | "PREPARING" | "SEPARATING" | "FINALIZING" | "CACHED"; percent: number | null; elapsed_sec: number; remaining_sec: number | null; scope?: "VOCAL"; scan_start_sec?: number; scan_end_sec?: number; audio_duration_sec?: number };
   cue_mode?: CueMode;
   source: "REKORDBOX" | "AUDIO";
   available: boolean;
@@ -140,7 +144,7 @@ export interface AnalysisInfo {
   vocal_start_sec?: number | null;
 }
 
-export interface AiStatus { available: boolean; model: string; local_only: boolean; reason: string | null }
+export interface AiStatus { available: boolean; model: string; local_only: boolean; reason: string | null; vocal_scan?: boolean }
 
 export interface GridPreview {
   content_id: string;
