@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from ..analysis.pipeline import analyze_file
-from ..analysis.ai import analyze_stems, AnalysisCancelled
+from ..analysis.fingerprint import file_analysis_inputs
+from ..analysis.ai import analyze_stems, load_cached_stems, AnalysisCancelled
 from ..analysis.vocals import vocal_start_from_stems, vocal_end_from_stems
-from ..common import ENGINE_VERSION, dumps, utcnow_iso
+from ..common import ENGINE_VERSION, dumps, loads, utcnow_iso
 from ..config import get_settings
 from ..domain.enums import BeatSource
 from ..domain.models import BeatGrid, PhraseSection
@@ -144,7 +145,26 @@ def _process_track(
         vocal_requested = bool({"VOCAL_START", "VOCAL_END"}.intersection(voice_targets))
         require_end = "VOCAL_END" in voice_targets
         analysis["vocal_end_requested"] = require_end
-        if params.get("analysis_quality") == "AI" and (not specialized or vocal_requested):
+        needs_ai = params.get("analysis_quality") == "AI" and (not specialized or vocal_requested)
+        vocal_only = params.get("ai_scope") == "VOCAL"
+        if needs_ai:
+            stems = load_cached_stems(path, vocal_only=vocal_only, require_end=require_end)
+        # Existing runs use the same fingerprint, so they can also be reused
+        # before any decoding, feature extraction, or AI inference starts.
+        if not needs_ai or stems is not None:
+            fingerprint, _, _ = file_analysis_inputs(
+                path, vocal_requested="VOCAL_START" in voice_targets, stem_analysis=stems,
+            )
+            if source_fingerprint:
+                fingerprint = "sha256:" + hashlib.sha256((fingerprint + source_fingerprint).encode("ascii")).hexdigest()
+            cached = repo.find_cached_run(
+                track_id=track_id, engine_version=ENGINE_VERSION, fingerprint=fingerprint, params=params,
+            )
+            if cached is not None:
+                saved_analysis = loads(cached["analysis_json"]) or analysis
+                _reuse_cached_run(repo, hub, job_id, track_id, cached, saved_analysis)
+                return
+        if needs_ai:
             analysis.update(available=False, analysis_quality="AI", ai_started_at=utcnow_iso(), stage="AI音源分離を準備しています…")
             repo.set_job_track_analysis(job_id, track_id, analysis)
 
@@ -155,7 +175,6 @@ def _process_track(
                 repo.set_job_track_analysis(job_id, track_id, analysis)
                 hub.publish(job_id, EventType.JOB_PROGRESS, {"track_id": track_id, "ai_progress": progress})
 
-            vocal_only = params.get("ai_scope") == "VOCAL"
             analysis["ai_scope"] = "VOCAL" if vocal_only else "FULL"
             stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed, vocal_only=vocal_only, require_end=require_end)
             if source == "REKORDBOX":
@@ -202,21 +221,7 @@ def _process_track(
         params=params,
     )
     if cached is not None:
-        run_id = str(cached["id"])
-        repo.set_job_track_analysis(job_id, track_id, analysis, run_id)
-        repo.set_job_track_status(job_id, track_id, "COMPLETED")
-        repo.bump_job_counts(job_id, completed=1)
-        hub.publish(
-            job_id,
-            EventType.TRACK_COMPLETED,
-            {
-                "track_id": track_id,
-                "run_id": run_id,
-                "candidates": len(repo.list_candidates_for_run(run_id)),
-                "cached": True,
-            },
-        )
-        _emit_progress(repo, hub, job_id)
+        _reuse_cached_run(repo, hub, job_id, track_id, cached, analysis)
         return
 
     run_id = repo.create_run(
@@ -244,6 +249,23 @@ def _process_track(
         EventType.TRACK_COMPLETED,
         {"track_id": track_id, "run_id": run_id, "candidates": len(result.candidates)},
     )
+    _emit_progress(repo, hub, job_id)
+
+
+def _reuse_cached_run(repo, hub, job_id, track_id, cached, analysis) -> None:
+    run_id = str(cached["id"])
+    analysis = {**analysis, "available": True, "cached": True}
+    for key in ("stage", "ai_started_at", "ai_progress"):
+        analysis.pop(key, None)
+    if analysis.get("ai_model"):
+        analysis["ai_cached"] = True
+    repo.set_job_track_analysis(job_id, track_id, analysis, run_id)
+    repo.set_job_track_status(job_id, track_id, "COMPLETED")
+    repo.bump_job_counts(job_id, completed=1)
+    hub.publish(job_id, EventType.TRACK_COMPLETED, {
+        "track_id": track_id, "run_id": run_id,
+        "candidates": len(repo.list_candidates_for_run(run_id)), "cached": True,
+    })
     _emit_progress(repo, hub, job_id)
 
 

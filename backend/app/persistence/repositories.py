@@ -170,8 +170,11 @@ class Repository:
         self, *, track_id: str, engine_version: str, fingerprint: str, params: dict[str, Any]
     ) -> sqlite3.Row | None:
         return self._conn.execute(
-            "SELECT * FROM analysis_run WHERE track_id=? AND engine_version=? AND "
-            "audio_fingerprint=? AND params_json=? AND status='COMPLETED'",
+            "SELECT r.*, (SELECT jt.analysis_json FROM job_track jt "
+            "WHERE jt.run_id=r.id AND jt.status='COMPLETED' LIMIT 1) AS analysis_json "
+            "FROM analysis_run r WHERE track_id=? AND engine_version=? AND "
+            "audio_fingerprint=? AND params_json=? AND status='COMPLETED' "
+            "ORDER BY finished_at DESC, r.rowid DESC LIMIT 1",
             (track_id, engine_version, fingerprint, dumps(params)),
         ).fetchone()
 

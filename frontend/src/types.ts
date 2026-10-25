@@ -121,6 +121,7 @@ export interface JobTrack {
 }
 
 export interface AnalysisInfo {
+  cached?: boolean;
   duration_ms?: number | null;
   ai_scope?: "FULL" | "VOCAL";
   vocal_analyzed_sec?: number;

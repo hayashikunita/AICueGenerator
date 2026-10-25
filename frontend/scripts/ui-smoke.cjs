@@ -93,7 +93,7 @@ const server = http.createServer(async (req, res) => {
     if (data.tracks.length > 1) {
       batchMode = true;
       jobs[0].total = jobs[0].completed = data.tracks.length;
-      batchTracks = data.tracks.map((t,i)=>({...t,id:'batch-'+i,status:'COMPLETED',duration_ms:30000,analysis:{source:'REKORDBOX',available:true,bpm:120+i*10,beat_count:60,downbeat_count:15,phrase_count:6,warnings:[]}}));
+      batchTracks = data.tracks.map((t,i)=>({...t,id:'batch-'+i,status:'COMPLETED',duration_ms:30000,analysis:{source:'REKORDBOX',available:true,cached:i===0,bpm:120+i*10,beat_count:60,downbeat_count:15,phrase_count:6,warnings:[]}}));
       batchCandidates = batchTracks.flatMap((t,index)=>(data.params.intro_outro?.targets??data.params.cue_targets).map((type,i)=>({id:`batch-cue-${index}-${i}`,track_id:t.id,run_id:'batch-run-'+index,type,time_ms:4000+i*(data.params.cue_mode==='INTRO_OUTRO'?1000:6000),original_time_ms:4000+i*(data.params.cue_mode==='INTRO_OUTRO'?1000:6000),confidence:type==='VOCAL_START'?30:85,rank:1,beat:8,band:type==='VOCAL_START'?'reject':'high',evidence:[],accepted:null,cue_kind:null})));
       if(memoryOverflowFixture) batchCandidates = batchTracks.flatMap((t,index)=>memoryScores.map((confidence,i)=>({id:`overflow-${index}-${i}`,track_id:t.id,run_id:'overflow-run-'+index,type:data.params.cue_targets[i%data.params.cue_targets.length],time_ms:i*1000,original_time_ms:i*1000,confidence,rank:i+1,beat:i*2,band:confidence>=66?'high':confidence>=40?'review':'reject',evidence:[],accepted:null,cue_kind:null})));
       candidates = batchCandidates;
@@ -551,7 +551,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     for(const index of [0,2]) await evaluate(`document.querySelectorAll('[aria-label=\"プレイリストの楽曲\"] button')[${index}].click()`);
     await until("!document.querySelector('.start-analysis').disabled");
     await click('2曲を一括解析 →');
-    await until("document.querySelector('.result-title')?.textContent==='2曲の一括解析' && document.querySelectorAll('[aria-label=\"キュー候補一覧\"] tbody tr').length===6");
+    await until("document.querySelector('.result-title')?.textContent==='2曲の解析結果' && document.querySelectorAll('[aria-label=\"キュー候補一覧\"] tbody tr').length===6");
+    assert.equal(await evaluate("document.body.textContent.includes('対象 2曲 · 新規解析 1曲 · 解析済み 1曲を再利用')"),true);
+    assert.equal(await evaluate("document.querySelectorAll('.result-track')[0].textContent.includes('解析済みを再利用')"),true);
+    assert.equal(await evaluate("document.querySelector('.analysis-source-info').textContent.includes('再解析をスキップ')"),true);
     assert.equal(created.tracks.length,2);
     assert.equal(created.params.bpm,null,'batch uses each track grid instead of the first BPM');
     assert.deepEqual(created.params.cue_targets,['CHORUS_START','CHORUS_END_MINUS_8_BARS','VOCAL_START']);

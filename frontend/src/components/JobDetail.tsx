@@ -126,6 +126,8 @@ export function JobDetail({
 
   const pct = job && job.total > 0 ? Math.round(((job.completed + job.failed) / job.total) * 100) : 0;
   const running = job ? !TERMINAL.has(job.status) : false;
+  const reusedTracks = tracks.filter((track) => track.status === "COMPLETED" && track.analysis?.cached).length;
+  const analyzedTracks = tracks.filter((track) => track.status === "COMPLETED" && !track.analysis?.cached).length;
   const configuredCandidates = useMemo(() => candidates.map((candidate) => ({ ...candidate,
     display_label: job?.params?.cue_mode === "INTRO_OUTRO" && job.params.intro_outro ? introOutroLabel(candidate.type as CueTarget, job.params.intro_outro) : undefined,
     preset: job?.params?.cue_settings?.[candidate.type] ?? job?.params?.cue_default })), [candidates, job?.params]);
@@ -171,8 +173,9 @@ export function JobDetail({
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <h2 style={{ marginBottom: 6 }}>解析結果</h2>
-            <h3 className="result-title">{job ? job.total > 1 ? `${job.total}曲の一括解析` : trackName(job.track_path, job.track_title, job.track_artist) : "読み込み中…"}</h3>
+            <h3 className="result-title">{job ? job.total > 1 ? `${job.total}曲の解析結果` : trackName(job.track_path, job.track_title, job.track_artist) : "読み込み中…"}</h3>
             <div className="muted" style={{ fontSize: 12 }}>{job ? jobDate(job.created_at) : ""}</div>
+            {job && <p className="field-help" role="status">対象 {job.total}曲 · {running ? "新規解析完了" : "新規解析"} {analyzedTracks}曲 · 解析済み {reusedTracks}曲を再利用</p>}
             {job?.params && job.params.cue_mode !== "INTRO_OUTRO" && <p className="field-help">解析単位：{job.params.beats_per_phrase ?? (job.params.bars_per_phrase ?? 16) * 4} Beat（{(job.params.beats_per_phrase ?? (job.params.bars_per_phrase ?? 16) * 4) / 4} 小節）</p>}
             {job?.params?.analysis_quality === "AI" && <p className="field-help">判定方法：AI補助（{job.params.ai_scope === "VOCAL" ? "ボーカルを検出" : "PC内で音源分離"}）</p>}
             {job?.params?.legacy_vocal_start && <p className="field-help">従来の候補＋歌い始め</p>}
@@ -229,7 +232,7 @@ export function JobDetail({
           <div className="batch-result-list">{tracks.map((track) => {
             const own = candidates.filter((c) => c.track_id === track.id);
             return <button type="button" key={track.id} className={`secondary result-track ${trackFilter === track.id ? "selected" : ""}`} aria-pressed={trackFilter === track.id} disabled={trackLocked} onClick={() => { setActiveTrackId(track.id); setTrackFilter(track.id); setPlaybackMs(0); setSeekRequest(null); }}>
-              <strong>{trackNames[track.id]}</strong><span>{jobStatus(track.status, track.status === "FAILED" ? 1 : 0)} · 候補 {own.length} · 採用 {own.filter((c) => c.accepted).length}</span>{track.analysis?.reason && <span className="error">{track.analysis.reason}</span>}
+              <strong>{trackNames[track.id]}</strong><span>{track.analysis?.cached ? "解析済みを再利用" : jobStatus(track.status, track.status === "FAILED" ? 1 : 0)} · 候補 {own.length} · 採用 {own.filter((c) => c.accepted).length}</span>{track.analysis?.reason && <span className="error">{track.analysis.reason}</span>}
             </button>;
           })}</div>
           {trackLocked && <p className="field-help" role="status">保存中の処理、または位置の調整を完了・破棄すると曲を切り替えられます。</p>}

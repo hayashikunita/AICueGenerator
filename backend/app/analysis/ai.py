@@ -66,6 +66,40 @@ def validate_stems(data: dict) -> dict:
     return data
 
 
+def _read_stem_cache(candidate: Path, *, vocal_only: bool, require_end: bool) -> dict | None:
+    try:
+        data = validate_stems(json.loads(candidate.read_text(encoding="utf-8")))
+        if data["schema"] != (2 if vocal_only else 1):
+            return None
+        return data if not (vocal_only and require_end) or data["scan_complete"] else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _cached_stems(original_fingerprint: str, *, vocal_only: bool, require_end: bool) -> dict | None:
+    revision = (VOCAL_REVISION + ("-full" if require_end else "")) if vocal_only else AI_REVISION
+    key = hashlib.sha256((revision + original_fingerprint).encode()).hexdigest()
+    cache = get_settings().data_dir / "ai-cache"
+    data = _read_stem_cache(cache / f"{key}.json", vocal_only=vocal_only, require_end=require_end)
+    if data is None and vocal_only:
+        # A completed vocal scan serves both start and end requests.
+        alternate = VOCAL_REVISION + ("" if require_end else "-full")
+        alternate_key = hashlib.sha256((alternate + original_fingerprint).encode()).hexdigest()
+        data = _read_stem_cache(cache / f"{alternate_key}.json", vocal_only=True, require_end=require_end)
+    if data is None and vocal_only:
+        full_key = hashlib.sha256((AI_REVISION + original_fingerprint).encode()).hexdigest()
+        full = _read_stem_cache(cache / f"{full_key}.json", vocal_only=False, require_end=False)
+        if full is not None:
+            data = {**full, "schema": 2, "scope": "VOCAL", "analyzed_sec": full["duration_sec"],
+                    "scan_complete": True, "stems": {"vocals": full["stems"]["vocals"]}}
+    return data
+
+
+def load_cached_stems(path: str, *, vocal_only: bool = False, require_end: bool = False) -> dict | None:
+    """Read saved separation without starting or waiting for AI inference."""
+    return _cached_stems(audio_fingerprint(path), vocal_only=vocal_only, require_end=require_end)
+
+
 def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal_only: bool = False, require_end: bool = False) -> tuple[dict, bool]:
     if not ai_status()["available"]:
         raise ValueError("AI解析環境・モデルが未準備です。通常解析を選ぶか、AI環境を準備してください。")
@@ -75,15 +109,6 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
     cache = get_settings().data_dir / "ai-cache"
     cache.mkdir(parents=True, exist_ok=True)
     output = cache / f"{key}.json"
-
-    def cached(candidate=output):
-        try:
-            data = validate_stems(json.loads(candidate.read_text(encoding="utf-8")))
-            if data["schema"] != (2 if vocal_only else 1):
-                return None
-            return data if not (vocal_only and require_end) or data["scan_complete"] else None
-        except (OSError, ValueError, TypeError, AttributeError):
-            return None
 
     queued_at = time.monotonic()
     notified_at = -1.0
@@ -102,24 +127,7 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
     try:
         if _cancelled(cancel_event):
             raise AnalysisCancelled()
-        data = cached()
-        if data is None and vocal_only:
-            # Completed vocal scans serve both start and end requests. A partial
-            # start scan cannot determine the last vocal in the song.
-            alternate = VOCAL_REVISION + ("" if require_end else "-full")
-            alternate_key = hashlib.sha256((alternate + original_fingerprint).encode()).hexdigest()
-            data = cached(cache / f"{alternate_key}.json")
-        if data is None and vocal_only:
-            # Previously completed full-song analysis already contains the voice.
-            # Reuse it without running the model again, discarding other stems.
-            full_key = hashlib.sha256((AI_REVISION + original_fingerprint).encode()).hexdigest()
-            try:
-                full = validate_stems(json.loads((cache / f"{full_key}.json").read_text(encoding="utf-8")))
-                if full["schema"] == 1:
-                    data = {**full, "schema": 2, "scope": "VOCAL", "analyzed_sec": full["duration_sec"],
-                            "scan_complete": True, "stems": {"vocals": full["stems"]["vocals"]}}
-            except (OSError, ValueError, TypeError, AttributeError):
-                pass
+        data = _cached_stems(original_fingerprint, vocal_only=vocal_only, require_end=require_end)
         if data is not None:
             notify({"phase": "CACHED", "percent": 100, "elapsed_sec": 0, "remaining_sec": 0})
             return data, True
@@ -158,7 +166,7 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
                         process.wait(timeout=5)
             if _cancelled(cancel_event):
                 raise AnalysisCancelled()
-            data = cached()
+            data = _read_stem_cache(output, vocal_only=vocal_only, require_end=require_end)
             if process.returncode != 0 or data is None:
                 raise ValueError("AI音源分離を完了できませんでした。通常解析を選んで再実行するか、AI環境を確認してください。")
             if audio_fingerprint(path) != original_fingerprint:

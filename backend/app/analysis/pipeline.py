@@ -161,9 +161,7 @@ def analyze_file(
 ) -> AnalysisResult:
     """音源ファイルをデコードして解析する（soundfile/librosa 必須）。"""
     from .decode import decode_mono
-    from .fingerprint import audio_fingerprint
-    from pathlib import Path
-    import hashlib
+    from .fingerprint import file_analysis_inputs
 
     decoded = decode_mono(path)
     legacy_vocal_start = legacy_vocal_start and intro_outro is None and cue_targets is None
@@ -172,25 +170,11 @@ def analyze_file(
         cue_targets = [target for target in intro_outro.get("targets", INTRO_OUTRO_DEFAULT_TARGETS) if target in {"VOCAL_START", "VOCAL_END"}] or None
         if not cue_targets:
             stem_analysis = None
-    fp = audio_fingerprint(path)
     vocal_requested = legacy_vocal_start or bool(cue_targets and "VOCAL_START" in cue_targets)
     end_requested = legacy_vocal_end or bool(cue_targets and "VOCAL_END" in cue_targets)
     vocal_end = vocal_end_from_stems(stem_analysis) if end_requested and stem_analysis is not None else None
-    vocal_start = None
-    lyric_warnings = []
-    if vocal_requested:
-        lyrics = Path(path).with_suffix(".lrc")
-        payload = b"none"
-        try:
-            if lyrics.is_file():
-                if lyrics.stat().st_size > 1024 * 1024:
-                    lyric_warnings.append("LRCが大きすぎるため歌い始めの読み込みを省略しました。")
-                else:
-                    payload = lyrics.read_bytes()
-                    vocal_start = lyric_start(payload.decode("utf-8-sig", errors="replace"), decoded.duration_sec)
-        except OSError:
-            lyric_warnings.append("同名LRCを読み込めませんでした。")
-        fp = "sha256:" + hashlib.sha256(fp.encode() + hashlib.sha256(payload).digest()).hexdigest()
+    fp, payload, lyric_warnings = file_analysis_inputs(path, vocal_requested=vocal_requested, stem_analysis=stem_analysis)
+    vocal_start = lyric_start(payload.decode("utf-8-sig", errors="replace"), decoded.duration_sec) if payload is not None else None
     vocal_source = "LRC"
     if vocal_start is None and stem_analysis is not None and vocal_requested:
         vocal_start = vocal_start_from_stems(stem_analysis)
@@ -199,9 +183,6 @@ def analyze_file(
             vocal_source = "DEMUCS_VOCAL"
         if vocal_start is None:
             lyric_warnings.append("分離したボーカルから継続する開始位置を特定できませんでした。" + ("歌い始めの候補は省略します。" if intro_outro is not None or legacy_vocal_start else "Verse先頭がある場合は仮候補として表示します。"))
-    if stem_analysis is not None:
-        import json
-        fp = "sha256:" + hashlib.sha256(fp.encode() + json.dumps(stem_analysis, sort_keys=True).encode()).hexdigest()
     result = analyze_waveform(
         decoded.y,
         decoded.sr,
