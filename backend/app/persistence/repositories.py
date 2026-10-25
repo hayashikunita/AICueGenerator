@@ -169,13 +169,19 @@ class Repository:
     def find_cached_run(
         self, *, track_id: str, engine_version: str, fingerprint: str, params: dict[str, Any]
     ) -> sqlite3.Row | None:
+        """Reuse the latest completed result, including manual additions."""
+        analysis_params = {
+            key: value for key, value in params.items()
+            if key not in {"manual_revision", "result_revision", "cue_default", "cue_settings"}
+        }
         return self._conn.execute(
             "SELECT r.*, (SELECT jt.analysis_json FROM job_track jt "
             "WHERE jt.run_id=r.id AND jt.status='COMPLETED' LIMIT 1) AS analysis_json "
             "FROM analysis_run r WHERE track_id=? AND engine_version=? AND "
-            "audio_fingerprint=? AND params_json=? AND status='COMPLETED' "
+            "audio_fingerprint=? AND json_remove(params_json, '$.manual_revision', '$.result_revision', "
+            "'$.cue_default', '$.cue_settings')=? AND status='COMPLETED' "
             "ORDER BY finished_at DESC, r.rowid DESC LIMIT 1",
-            (track_id, engine_version, fingerprint, dumps(params)),
+            (track_id, engine_version, fingerprint, dumps(analysis_params)),
         ).fetchone()
 
     def create_run(
@@ -187,6 +193,17 @@ class Repository:
         fingerprint: str,
         beat_source: str,
         pssi_used: bool,
+    ) -> str:
+        run_id = self._insert_run(
+            track_id=track_id, engine_version=engine_version, params=params,
+            fingerprint=fingerprint, beat_source=beat_source, pssi_used=pssi_used,
+        )
+        self._conn.commit()
+        return run_id
+
+    def _insert_run(
+        self, *, track_id: str, engine_version: str, params: dict[str, Any],
+        fingerprint: str, beat_source: str, pssi_used: bool,
     ) -> str:
         run_id = new_id()
         self._conn.execute(
@@ -205,7 +222,6 @@ class Repository:
                 utcnow_iso(),
             ),
         )
-        self._conn.commit()
         return run_id
 
     def finish_run(self, run_id: str, *, status: str, error_id: str | None = None) -> None:
@@ -224,12 +240,115 @@ class Repository:
         downbeats: list[int],
         energy: list[float] | None = None,
     ) -> None:
+        self._save_feature_summary(run_id, bpm=bpm, beat_times=beat_times, downbeats=downbeats, energy=energy)
+        self._conn.commit()
+
+    def _save_feature_summary(
+        self, run_id: str, *, bpm: float | None, beat_times: list[float],
+        downbeats: list[int], energy: list[float] | None = None,
+    ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO feature_summary (run_id, bpm, beat_times_json, "
             "downbeats_json, energy_json) VALUES (?,?,?,?,?)",
             (run_id, bpm, dumps(beat_times), dumps(downbeats), dumps(energy) if energy else None),
         )
-        self._conn.commit()
+
+    def save_completed_run(
+        self, *, job_id: str, track_id: str, engine_version: str, params: dict[str, Any],
+        fingerprint: str, beat_source: str, pssi_used: bool,
+        bpm: float, beat_times: list[float], downbeats: list[int],
+        candidates: list[dict[str, Any]], analysis: dict[str, Any],
+    ) -> tuple[str, bool]:
+        """Publish one complete result atomically; retry only unfinished saves.
+
+        Serialising the lookup and write also lets simultaneous jobs reuse a
+        result saved by the other job without replacing completed history.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            cached = self.find_cached_run(
+                track_id=track_id, engine_version=engine_version, fingerprint=fingerprint, params=params,
+            )
+            if cached is not None:
+                return str(cached["id"]), True
+            unfinished = self._conn.execute(
+                "SELECT id FROM analysis_run WHERE track_id=? AND engine_version=? "
+                "AND audio_fingerprint=? AND params_json=? AND status!='COMPLETED'",
+                (track_id, engine_version, fingerprint, dumps(params)),
+            ).fetchone()
+            if unfinished is None:
+                run_id = self._insert_run(
+                    track_id=track_id, engine_version=engine_version, params=params,
+                    fingerprint=fingerprint, beat_source=beat_source, pssi_used=pssi_used,
+                )
+            else:
+                run_id = str(unfinished["id"])
+                # Partial candidates were never published as a completed result.
+                self._conn.execute("DELETE FROM cue_candidate WHERE run_id=?", (run_id,))
+                self._conn.execute(
+                    "UPDATE analysis_run SET beat_source=?, pssi_used=?, started_at=? WHERE id=?",
+                    (beat_source, int(pssi_used), utcnow_iso(), run_id),
+                )
+            self._save_feature_summary(run_id, bpm=bpm, beat_times=beat_times, downbeats=downbeats)
+            self._insert_candidates(run_id, candidates)
+            self._conn.execute(
+                "UPDATE analysis_run SET status='COMPLETED', error_id=NULL, finished_at=? WHERE id=?",
+                (utcnow_iso(), run_id),
+            )
+            self._complete_job_track(job_id, track_id, run_id, analysis)
+        return run_id, False
+
+    def _complete_job_track(self, job_id: str, track_id: str, run_id: str, analysis: dict[str, Any]) -> None:
+        self._conn.execute(
+            "UPDATE job_track SET run_id=?, analysis_json=?, status='COMPLETED', error_id=NULL "
+            "WHERE job_id=? AND track_id=?",
+            (run_id, dumps(analysis), job_id, track_id),
+        )
+        self._conn.execute(
+            "UPDATE analysis_job SET completed=completed+1, updated_at=? WHERE id=?",
+            (utcnow_iso(), job_id),
+        )
+
+    def _copy_completed_run(self, source: sqlite3.Row, params: dict[str, Any]) -> str:
+        """Copy saved features and decisions without decoding the source audio."""
+        run_id = self._insert_run(
+            track_id=source["track_id"], engine_version=source["engine_version"], params=params,
+            fingerprint=source["audio_fingerprint"], beat_source=source["beat_source"], pssi_used=bool(source["pssi_used"]),
+        )
+        self._conn.execute(
+            "INSERT INTO feature_summary SELECT ?,bpm,beat_times_json,downbeats_json,bars_json,"
+            "energy_json,waveform_peaks_json FROM feature_summary WHERE run_id=?", (run_id, source["id"]),
+        )
+        for original in self._conn.execute("SELECT id FROM cue_candidate WHERE run_id=?", (source["id"],)).fetchall():
+            copied_id = new_id()
+            self._conn.execute(
+                "INSERT INTO cue_candidate SELECT ?,?,type,time_ms,beat,bar,confidence,rank,evidence_json,? "
+                "FROM cue_candidate WHERE id=?", (copied_id, run_id, utcnow_iso(), original["id"]),
+            )
+            self._conn.execute(
+                "INSERT INTO cue_decision SELECT ?,?,accepted,edited_time_ms,cue_kind,slot,color,comment,updated_at "
+                "FROM cue_decision WHERE candidate_id=?", (new_id(), copied_id, original["id"]),
+            )
+        self._conn.execute("UPDATE analysis_run SET status='COMPLETED', finished_at=? WHERE id=?", (utcnow_iso(), run_id))
+        return run_id
+
+    def reuse_completed_run(
+        self, *, job_id: str, track_id: str, run_id: str, params: dict[str, Any], analysis: dict[str, Any],
+    ) -> str:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            source = self._conn.execute(
+                "SELECT * FROM analysis_run WHERE id=? AND track_id=? AND status='COMPLETED'", (run_id, track_id),
+            ).fetchone()
+            if source is None:
+                raise ValueError("再利用する解析結果が見つかりません。")
+            old_params = loads(source["params_json"]) or {}
+            if (old_params.get("cue_default") != params.get("cue_default")
+                    or (old_params.get("cue_settings") or {}) != (params.get("cue_settings") or {})):
+                # Keep future adoption changes independent of older presets.
+                run_id = self._copy_completed_run(source, {**params, "result_revision": new_id()})
+            self._complete_job_track(job_id, track_id, run_id, analysis)
+        return run_id
 
     # --- cue_candidate -----------------------------------------------------
     def get_feature_summary(self, run_id: str) -> sqlite3.Row | None:
@@ -248,22 +367,21 @@ class Repository:
             old_run = self._conn.execute("SELECT * FROM analysis_run WHERE id=?", (jt["run_id"],)).fetchone()
             if old_run is None:
                 raise ValueError("解析結果が見つかりません。")
-            run_id, candidate_id, now = new_id(), new_id(), utcnow_iso()
+            candidate_id, now = new_id(), utcnow_iso()
             params = loads(old_run["params_json"]) or {}
             params["manual_revision"] = new_id()
-            self._conn.execute("INSERT INTO analysis_run (id,track_id,engine_version,params_json,audio_fingerprint,beat_source,pssi_used,status,started_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                               (run_id, track_id, old_run["engine_version"], dumps(params), old_run["audio_fingerprint"], old_run["beat_source"], old_run["pssi_used"], "COMPLETED", now, now))
-            self._conn.execute("INSERT INTO feature_summary SELECT ?,bpm,beat_times_json,downbeats_json,bars_json,energy_json,waveform_peaks_json FROM feature_summary WHERE run_id=?", (run_id, old_run["id"]))
-            for original in self._conn.execute("SELECT * FROM cue_candidate WHERE run_id=?", (old_run["id"],)).fetchall():
-                copied_id = new_id()
-                self._conn.execute("INSERT INTO cue_candidate SELECT ?,?,type,time_ms,beat,bar,confidence,rank,evidence_json,? FROM cue_candidate WHERE id=?", (copied_id, run_id, now, original["id"]))
-                self._conn.execute("INSERT INTO cue_decision SELECT ?,?,accepted,edited_time_ms,cue_kind,slot,color,comment,updated_at FROM cue_decision WHERE candidate_id=?", (new_id(), copied_id, original["id"]))
+            run_id = self._copy_completed_run(old_run, params)
             rank = self._conn.execute("SELECT COALESCE(MAX(rank),0)+1 FROM cue_candidate WHERE run_id=? AND type=?", (run_id, candidate["type"])).fetchone()[0]
             self._conn.execute("INSERT INTO cue_candidate (id,run_id,type,time_ms,beat,bar,confidence,rank,evidence_json,created_at) VALUES (?,?,?,?,?,NULL,0,?,?,?)", (candidate_id, run_id, candidate["type"], candidate["time_ms"], candidate["beat"], rank, dumps(candidate["evidence"]), now))
             self._conn.execute("UPDATE job_track SET run_id=? WHERE job_id=? AND track_id=?", (run_id, job_id, track_id))
         return candidate_id
 
     def add_candidates(self, run_id: str, candidates: list[dict[str, Any]]) -> list[str]:
+        ids = self._insert_candidates(run_id, candidates)
+        self._conn.commit()
+        return ids
+
+    def _insert_candidates(self, run_id: str, candidates: list[dict[str, Any]]) -> list[str]:
         ids: list[str] = []
         now = utcnow_iso()
         rows = []
@@ -289,7 +407,6 @@ class Repository:
             "rank, evidence_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
-        self._conn.commit()
         return ids
 
     def get_candidate(self, candidate_id: str) -> sqlite3.Row | None:

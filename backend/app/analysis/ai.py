@@ -10,7 +10,7 @@ import threading
 import time
 
 from ..config import get_settings
-from .fingerprint import audio_fingerprint
+from .fingerprint import AudioInput, audio_fingerprint
 from .ai_progress import inference_progress
 
 AI_REVISION = "htdemucs-envelopes-1"
@@ -95,15 +95,20 @@ def _cached_stems(original_fingerprint: str, *, vocal_only: bool, require_end: b
     return data
 
 
-def load_cached_stems(path: str, *, vocal_only: bool = False, require_end: bool = False) -> dict | None:
+def load_cached_stems(path: str, *, vocal_only: bool = False, require_end: bool = False, audio_input: AudioInput | None = None) -> dict | None:
     """Read saved separation without starting or waiting for AI inference."""
-    return _cached_stems(audio_fingerprint(path), vocal_only=vocal_only, require_end=require_end)
+    if audio_input is not None:
+        audio_input.verify(path)
+    fingerprint = audio_input.fingerprint if audio_input is not None else audio_fingerprint(path)
+    return _cached_stems(fingerprint, vocal_only=vocal_only, require_end=require_end)
 
 
-def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal_only: bool = False, require_end: bool = False) -> tuple[dict, bool]:
+def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal_only: bool = False, require_end: bool = False, audio_input: AudioInput | None = None) -> tuple[dict, bool]:
     if not ai_status()["available"]:
         raise ValueError("AI解析環境・モデルが未準備です。通常解析を選ぶか、AI環境を準備してください。")
-    original_fingerprint = audio_fingerprint(path)
+    if audio_input is not None:
+        audio_input.verify(path)
+    original_fingerprint = audio_input.fingerprint if audio_input is not None else audio_fingerprint(path)
     revision = (VOCAL_REVISION + ("-full" if require_end else "")) if vocal_only else AI_REVISION
     key = hashlib.sha256((revision + original_fingerprint).encode()).hexdigest()
     cache = get_settings().data_dir / "ai-cache"
@@ -127,8 +132,12 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
     try:
         if _cancelled(cancel_event):
             raise AnalysisCancelled()
+        if audio_input is not None:
+            audio_input.verify(path)
         data = _cached_stems(original_fingerprint, vocal_only=vocal_only, require_end=require_end)
         if data is not None:
+            if audio_input is not None:
+                audio_input.verify(path)
             notify({"phase": "CACHED", "percent": 100, "elapsed_sec": 0, "remaining_sec": 0})
             return data, True
         executable, models = ai_paths()

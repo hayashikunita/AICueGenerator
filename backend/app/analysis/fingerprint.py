@@ -8,9 +8,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 _CHUNK = 1024 * 1024
+
+
+def _file_state(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino
+
+
+@dataclass(frozen=True)
+class AudioInput:
+    """One track's content hash, shared only while that file stays unchanged."""
+
+    path: Path
+    fingerprint: str
+    state: tuple[int, int, int, int]
+
+    @classmethod
+    def read(cls, path: str | Path) -> "AudioInput":
+        source = Path(path).resolve()
+        state = _file_state(source)
+        result = cls(source, audio_fingerprint(source), state)
+        result.verify(source)
+        return result
+
+    def verify(self, path: str | Path) -> None:
+        if Path(path).resolve() != self.path or _file_state(self.path) != self.state:
+            raise ValueError("解析中に音源が変更されました。最新の音源で実行し直してください。")
 
 
 def audio_fingerprint(path: str | Path) -> str:
@@ -31,12 +58,15 @@ def audio_fingerprint(path: str | Path) -> str:
 
 def file_analysis_inputs(
     path: str | Path, *, vocal_requested: bool = False, stem_analysis: dict | None = None,
+    audio_input: AudioInput | None = None,
 ) -> tuple[str, bytes | None, list[str]]:
     """Identify all file inputs without decoding or analysing the audio.
 
     Keep the fingerprint compatible with existing saved analysis runs.
     """
-    fingerprint = audio_fingerprint(path)
+    if audio_input is not None:
+        audio_input.verify(path)
+    fingerprint = audio_input.fingerprint if audio_input is not None else audio_fingerprint(path)
     lyrics_payload = None
     warnings: list[str] = []
     if vocal_requested:

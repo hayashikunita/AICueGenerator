@@ -36,7 +36,6 @@ export function JobDetail({
   const [drafting, setDrafting] = useState(false);
   const [seekRequest, setSeekRequest] = useState<{ time_ms: number; sequence: number } | null>(null);
   const seekSequence = useRef(0);
-  const wsRef = useRef<WebSocket | null>(null);
   const toast = useToast();
 
   const refreshJob = () => {
@@ -59,6 +58,8 @@ export function JobDetail({
   };
 
   useEffect(() => {
+    let active = true;
+    let finished = false;
     setJob(null);
     setCandidates([]);
     setTracks([]);
@@ -70,18 +71,21 @@ export function JobDetail({
     loadTracks();
 
     const ws = openProgressSocket(jobId);
-    wsRef.current = ws;
     ws.onmessage = (ev) => {
+      if (!active) return;
       const p: ProgressEvent = JSON.parse(ev.data);
       setLog((l) => [...l, `[${p.seq}] ${p.type} ${JSON.stringify(p.data)}`]);
-      if (p.type === "JOB_PROGRESS") loadTracks();
-      if (["TRACK_STARTED", "TRACK_COMPLETED", "TRACK_FAILED", "JOB_COMPLETED"].includes(p.type)) {
-        loadTracks();
-        loadCandidates();
-        refreshJob();
+      const terminal = ["JOB_COMPLETED", "JOB_CANCELLED", "JOB_FAILED"].includes(p.type);
+      if (terminal && finished) return;
+      if (terminal) {
+        finished = true;
+        window.clearInterval(timer);
       }
-      if (["JOB_COMPLETED", "JOB_CANCELLED", "JOB_FAILED"].includes(p.type)) {
+      if (p.type === "JOB_PROGRESS") {
         loadTracks();
+      } else if (terminal || ["TRACK_STARTED", "TRACK_COMPLETED", "TRACK_FAILED"].includes(p.type)) {
+        loadTracks();
+        if (p.type !== "TRACK_STARTED") loadCandidates();
         refreshJob();
       }
     };
@@ -93,8 +97,10 @@ export function JobDetail({
     // WebSocket が切断されても進捗と結果を取得できるようにする。
     const timer = window.setInterval(() => {
       api.getJob(jobId).then((next) => {
+        if (!active || finished) return;
         setJob(next);
         if (TERMINAL.has(next.status)) {
+          finished = true;
           loadTracks();
           loadCandidates();
           onJobUpdated();
@@ -104,9 +110,9 @@ export function JobDetail({
     }, 4000);
 
     return () => {
+      active = false;
       window.clearInterval(timer);
       ws.close();
-      wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);

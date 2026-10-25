@@ -12,7 +12,6 @@ from ..rekordbox.metadata import track_metadata
 from ..analysis.ai import ai_status
 from ..schemas.jobs import (
     CandidateListResponse,
-    CandidateOut,
     CreateJobRequest,
     CreateJobResponse,
     JobListResponse,
@@ -24,10 +23,6 @@ from ..schemas.jobs import (
 from .deps import get_manager, get_repo, require_token
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"], dependencies=[Depends(require_token)])
-
-
-def _candidate_out(row) -> CandidateOut:
-    return candidate_out(row)
 
 
 def _report_candidate(row) -> dict:
@@ -107,7 +102,7 @@ def job_candidates(job_id: str, repo: Repository = Depends(get_repo)) -> Candida
     if repo.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="job not found")
     rows = repo.list_candidates_for_job(job_id)
-    return CandidateListResponse(candidates=[_candidate_out(r) for r in rows])
+    return CandidateListResponse(candidates=[candidate_out(r) for r in rows])
 
 
 @router.get("/jobs/{job_id}/report")

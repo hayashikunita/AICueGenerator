@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..analysis.pipeline import analyze_file
-from ..analysis.fingerprint import file_analysis_inputs
+from ..analysis.fingerprint import AudioInput, file_analysis_inputs
 from ..analysis.ai import analyze_stems, load_cached_stems, AnalysisCancelled
 from ..analysis.vocals import vocal_start_from_stems, vocal_end_from_stems
 from ..common import ENGINE_VERSION, dumps, loads, utcnow_iso
@@ -123,6 +123,7 @@ def _process_track(
         return
 
     try:
+        audio_input = AudioInput.read(path)
         grid = None
         phrase_boundaries: tuple[int, ...] = ()
         phrase_sections: tuple[PhraseSection, ...] = ()
@@ -148,12 +149,12 @@ def _process_track(
         needs_ai = params.get("analysis_quality") == "AI" and (not specialized or vocal_requested)
         vocal_only = params.get("ai_scope") == "VOCAL"
         if needs_ai:
-            stems = load_cached_stems(path, vocal_only=vocal_only, require_end=require_end)
+            stems = load_cached_stems(path, vocal_only=vocal_only, require_end=require_end, audio_input=audio_input)
         # Existing runs use the same fingerprint, so they can also be reused
         # before any decoding, feature extraction, or AI inference starts.
         if not needs_ai or stems is not None:
             fingerprint, _, _ = file_analysis_inputs(
-                path, vocal_requested="VOCAL_START" in voice_targets, stem_analysis=stems,
+                path, vocal_requested="VOCAL_START" in voice_targets, stem_analysis=stems, audio_input=audio_input,
             )
             if source_fingerprint:
                 fingerprint = "sha256:" + hashlib.sha256((fingerprint + source_fingerprint).encode("ascii")).hexdigest()
@@ -161,8 +162,9 @@ def _process_track(
                 track_id=track_id, engine_version=ENGINE_VERSION, fingerprint=fingerprint, params=params,
             )
             if cached is not None:
+                audio_input.verify(path)
                 saved_analysis = loads(cached["analysis_json"]) or analysis
-                _reuse_cached_run(repo, hub, job_id, track_id, cached, saved_analysis)
+                _reuse_cached_run(repo, hub, job_id, track_id, str(cached["id"]), saved_analysis, params)
                 return
         if needs_ai:
             analysis.update(available=False, analysis_quality="AI", ai_started_at=utcnow_iso(), stage="AI音源分離を準備しています…")
@@ -176,7 +178,7 @@ def _process_track(
                 hub.publish(job_id, EventType.JOB_PROGRESS, {"track_id": track_id, "ai_progress": progress})
 
             analysis["ai_scope"] = "VOCAL" if vocal_only else "FULL"
-            stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed, vocal_only=vocal_only, require_end=require_end)
+            stems, cached_stems = analyze_stems(path, cancel_event=cancel_event, progress_callback=progress_changed, vocal_only=vocal_only, require_end=require_end, audio_input=audio_input)
             if source == "REKORDBOX":
                 with open_rekordbox(path=settings.rekordbox_db_path, key=settings.rekordbox_key) as db:
                     latest_snapshot = load_track_analysis(db, str(track["content_id"]), path)
@@ -187,7 +189,7 @@ def _process_track(
             if stems.get("scope") == "VOCAL":
                 analysis.update(vocal_analyzed_sec=stems["analyzed_sec"], vocal_scan_complete=stems["scan_complete"])
             repo.set_job_track_analysis(job_id, track_id, analysis)
-        result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, beats_per_phrase=beats_per_phrase, top_k=top_k, beatgrid=grid, phrase_boundaries=phrase_boundaries,
+        result = analyze_file(path, bpm=bpm, bars_per_phrase=bars_per_phrase, beats_per_phrase=beats_per_phrase, top_k=top_k, beatgrid=grid, phrase_boundaries=phrase_boundaries, audio_input=audio_input,
                               phrase_sections=phrase_sections, cue_targets=params.get("cue_targets"), end_alignment_bars=params.get("end_alignment_bars", 1),
                               stem_analysis=stems, intro_outro=(params.get("intro_outro") or {}) if specialized else None,
                               legacy_vocal_start=bool(params.get("legacy_vocal_start") and params.get("cue_mode", "LEGACY") == "LEGACY" and not params.get("cue_targets")),
@@ -214,36 +216,20 @@ def _process_track(
         _fail_track(repo, hub, job_id, track_id, ErrorCode.DECODE_FAILED)
         return
 
-    cached = repo.find_cached_run(
-        track_id=track_id,
-        engine_version=ENGINE_VERSION,
-        fingerprint=fingerprint,
-        params=params,
-    )
-    if cached is not None:
-        _reuse_cached_run(repo, hub, job_id, track_id, cached, analysis)
+    try:
+        run_id, reused = repo.save_completed_run(
+            job_id=job_id, track_id=track_id, engine_version=ENGINE_VERSION, params=params,
+            fingerprint=fingerprint, beat_source=result.beatgrid.source.value,
+            pssi_used=bool(phrase_boundaries), bpm=result.beatgrid.bpm,
+            beat_times=list(result.beatgrid.beat_times), downbeats=list(result.beatgrid.downbeat_indices),
+            candidates=[_cue_to_row(c) for c in result.candidates], analysis=analysis,
+        )
+    except Exception as exc:  # noqa: BLE001 - 保存失敗も曲単位で継続する
+        _fail_save(repo, hub, job_id, track_id, analysis, exc)
         return
-
-    run_id = repo.create_run(
-        track_id=track_id,
-        engine_version=ENGINE_VERSION,
-        params=params,
-        fingerprint=fingerprint,
-        beat_source=result.beatgrid.source.value,
-        pssi_used=bool(phrase_boundaries),
-    )
-    repo.save_feature_summary(
-        run_id,
-        bpm=result.beatgrid.bpm,
-        beat_times=list(result.beatgrid.beat_times),
-        downbeats=list(result.beatgrid.downbeat_indices),
-    )
-    repo.add_candidates(run_id, [_cue_to_row(c) for c in result.candidates])
-    repo.finish_run(run_id, status="COMPLETED")
-    repo.set_job_track_analysis(job_id, track_id, analysis, run_id)
-
-    repo.set_job_track_status(job_id, track_id, "COMPLETED")
-    repo.bump_job_counts(job_id, completed=1)
+    if reused:
+        _reuse_cached_run(repo, hub, job_id, track_id, run_id, analysis, params)
+        return
     hub.publish(
         job_id,
         EventType.TRACK_COMPLETED,
@@ -252,21 +238,30 @@ def _process_track(
     _emit_progress(repo, hub, job_id)
 
 
-def _reuse_cached_run(repo, hub, job_id, track_id, cached, analysis) -> None:
-    run_id = str(cached["id"])
+def _reuse_cached_run(repo, hub, job_id, track_id, run_id: str, analysis, params) -> None:
     analysis = {**analysis, "available": True, "cached": True}
     for key in ("stage", "ai_started_at", "ai_progress"):
         analysis.pop(key, None)
     if analysis.get("ai_model"):
         analysis["ai_cached"] = True
-    repo.set_job_track_analysis(job_id, track_id, analysis, run_id)
-    repo.set_job_track_status(job_id, track_id, "COMPLETED")
-    repo.bump_job_counts(job_id, completed=1)
+    try:
+        run_id = repo.reuse_completed_run(job_id=job_id, track_id=track_id, run_id=run_id, params=params, analysis=analysis)
+    except Exception as exc:  # noqa: BLE001 - 再利用結果の保存失敗も曲単位で継続する
+        _fail_save(repo, hub, job_id, track_id, analysis, exc)
+        return
     hub.publish(job_id, EventType.TRACK_COMPLETED, {
         "track_id": track_id, "run_id": run_id,
         "candidates": len(repo.list_candidates_for_run(run_id)), "cached": True,
     })
     _emit_progress(repo, hub, job_id)
+
+
+def _fail_save(repo, hub, job_id, track_id, analysis, exc: Exception) -> None:
+    analysis.update(available=False, reason=f"解析結果を保存できませんでした: {exc}")
+    repo.set_job_track_analysis(job_id, track_id, analysis)
+    repo.add_audit(actor="worker", action="save_analysis", result="error",
+                   job_id=job_id, track_id=track_id, after={"error": str(exc)})
+    _fail_track(repo, hub, job_id, track_id, ErrorCode.COMMIT_FAILED)
 
 
 def _fail_track(

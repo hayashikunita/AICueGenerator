@@ -16,6 +16,7 @@ export function ManualCueForm({ jobId, trackId, currentTimeMs, onAdded, disabled
   return <details className="manual-cue-form">
     <summary>見つからなかった位置を、試聴して候補に追加</summary>
     <p className="field-help">自動で特定できない歌い始めなどを補えます。追加後にHot Cue／Memory Cueを選んで採用してください。</p>
+    <p className="field-help">同じ音源・解析設定で結果を再利用するときは、最後に手動追加した候補と採用状態も自動で引き継ぎます。</p>
     <form onSubmit={async (event) => {
       event.preventDefault();
       if (busy || disabled) return;

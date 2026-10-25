@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '../..');
 const out = path.join(root, 'frontend/node_modules/.cache/aicue-ux');
 const assets = path.join(root, 'backend/static');
+const apiRequests = new Map();
 fs.mkdirSync(out, {recursive:true});
 const jobs = ['one', 'two'].map((id, i) => ({ id, status: 'COMPLETED', total: 1, completed: 1, failed: 0, track_path: `C:/Music/${i ? 'Second song' : 'First song'}.wav`, created_at: '2026-10-24T00:00:00Z', updated_at: '2026-10-24T00:00:00Z' }));
 let candidates = ['drop', 'break'].map((id, i) => ({ id, run_id: 'run', type: i ? 'BREAK' : 'DROP', time_ms: i ? 30000 : 60000, confidence: i ? 60 : 90, rank: 1, beat: 32, band: i ? 'review' : 'high', evidence: [], accepted: null, cue_kind: null }));
@@ -51,6 +52,7 @@ previewAudio.write('data',36); previewAudio.writeUInt32LE(previewAudio.length-44
 const gridPreview = firstBeat => ({ content_id:'RB1',title:'Library song',path:'C:/Music/Library.wav',first_beat:firstBeat,beat_count:384,blocked_reason:gridRunning?'保存するには rekordbox を終了してください。':null,beats:Array.from({length:8},(_,i)=>{const before=(i-gridOffset+8)%4+1;return {time_ms:137+i*500,before,after:(before-firstBeat+4)%4+1};}) });
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname.startsWith('/api/')) apiRequests.set(url.pathname, (apiRequests.get(url.pathname) || 0) + 1);
   if (!url.pathname.startsWith('/api/')) {
     const file = path.join(assets, url.pathname === '/' ? 'index.html' : url.pathname);
     if (!fs.existsSync(file)) { res.writeHead(404); res.end(); return; }
@@ -177,7 +179,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const cachedBrowser = browserRoot && fs.existsSync(browserRoot) ? fs.readdirSync(browserRoot).filter(n=>n.startsWith('chromium_headless_shell-')).sort().reverse().map(n=>path.join(browserRoot,n,'chrome-headless-shell-win64/chrome-headless-shell.exe')).find(p=>fs.existsSync(p)) : null;
   const exe = process.env.CHROMIUM_PATH || cachedBrowser;
   if (!exe || !fs.existsSync(exe)) { server.close();throw new Error('Set CHROMIUM_PATH to a Chromium executable.'); }
-  const profile = path.join(out, 'profile');
+  const profile = process.env.AICUE_UI_PROFILE || path.join(out, 'profile');
   try { fs.unlinkSync(path.join(profile, 'DevToolsActivePort')); } catch {}
   const browser = spawn(exe, ['--headless', '--disable-gpu', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
   let ws;
@@ -208,7 +210,39 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       } else await evaluate(`(()=>{const e=document.querySelector('input[aria-label="${label}"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,${JSON.stringify(value)});e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     };
     const openColors = async () => { await evaluate("Array.from(document.querySelectorAll('.panel')).find(p=>p.querySelector('h2')?.textContent.includes('キュー色設定')).querySelector('button').click()");await until("document.querySelector('button[aria-label=\"Memory Cue の色\"]')"); };
+    const verifyCompletionRefresh = async () => {
+      jobs.splice(0,jobs.length,{id:'one',status:'COMPLETED',total:1,completed:1,failed:0,track_path:'C:/Music/Refresh.wav',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),params:{analysis_quality:'STANDARD'}});
+      batchMode=false; purposeMode=true; aiAvailable=false;
+      candidates=[{id:'refresh-cue',run_id:'refresh-run',type:'INTRO_START',time_ms:1000,confidence:85,rank:1,beat:2,band:'high',evidence:[],accepted:null,cue_kind:null}];
+      await call('Page.enable');
+      await call('Page.addScriptToEvaluateOnNewDocument',{source:`
+        window.__progressSockets=[];
+        window.WebSocket=class {
+          constructor(url) { this.url=url; window.__progressSockets.push(this); }
+          close() {}
+        };
+      `});
+      await call('Page.navigate',{url:base+'/?token=ux-test&check=refresh'});
+      await until("Array.isArray(window.__progressSockets) && document.querySelectorAll('.job').length===1");
+      await evaluate("document.querySelector('.job').click()");
+      await until("window.__progressSockets.length===1 && document.querySelector('.result-title') && document.querySelectorAll('.candidate-table tbody tr').length>0");
+      await sleep(300);
+      apiRequests.clear();
+      await evaluate("window.__progressSockets[0].onmessage({data:JSON.stringify({seq:1,type:'JOB_COMPLETED',job_id:'one',ts:new Date().toISOString(),data:{}})})");
+      for(let attempt=0;attempt<100 && !(apiRequests.get('/api/v1/jobs/one/tracks') && apiRequests.get('/api/v1/jobs/one/candidates') && apiRequests.get('/api/v1/jobs'));attempt++) await sleep(50);
+      const refreshPaths=['/api/v1/jobs/one','/api/v1/jobs/one/tracks','/api/v1/jobs/one/candidates','/api/v1/jobs'];
+      assert.deepEqual(refreshPaths.map(p=>apiRequests.get(p)||0),[1,1,1,1],'completion refreshes each resource once');
+      await evaluate("window.__progressSockets[0].onmessage({data:JSON.stringify({seq:2,type:'JOB_COMPLETED',job_id:'one',ts:new Date().toISOString(),data:{}})})");
+      await sleep(4300);
+      assert.deepEqual(refreshPaths.map(p=>apiRequests.get(p)||0),[1,1,1,1],'completion stops polling and ignores repeated terminal events');
+    };
     await call('Runtime.enable');
+    if(process.env.AICUE_UI_REFRESH_ONLY==='1') {
+      await verifyCompletionRefresh();
+      assert.deepEqual(errors,[]);
+      console.log('PASS: completion refreshes summary, tracks, candidates and history once; repeated completion and terminal polling produce no extra reads.');
+      return;
+    }
     await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1050,deviceScaleFactor:1,mobile:false});
     await call('Page.navigate',{url:base+'/?token=ux-test'});
     await until("document.querySelectorAll('.job').length===2");
@@ -1027,6 +1061,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("document.querySelector('#analysis-quality')?.value==='STANDARD' && document.querySelector('#analysis-quality option[value=AI]')?.disabled");
     await click('イントロアウトロ特化');
     assert.equal(await evaluate("document.querySelector('#analysis-quality-help').textContent.includes('歌詞時刻がない場合は省略')"),true);
+    await verifyCompletionRefresh();
     assert.deepEqual(errors,[]);
     console.log('PASS: Memory Cue eight-color palette and unset, persisted unset and XML null, menu keyboard controls, MEMORY/HOT CUE dock and audition; playlist-wide selection across pagination, deduplication, unavailable-grid exclusion, two tracks x three purposes, correct track audition, scoped review and drafts, confirmed bulk BOTH adoption, save locks, full-job export, 1440/768/390px layouts; existing purpose/grid/color/audio regressions; no runtime exceptions.');
     console.log('Screenshots: '+out);

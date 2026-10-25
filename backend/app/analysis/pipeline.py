@@ -18,6 +18,7 @@ from .structure import generate_candidates
 from .structure_evidence import boundary_strengths, repeated_section_scores
 from .vocals import vocal_start_from_stems, vocal_end_from_stems
 from .intro_outro import intro_outro_candidates
+from .fingerprint import AudioInput, file_analysis_inputs
 
 # PSSI フレーズ型 → Cue 種別の対応（整合時に加点）。型番号は仮置きで P0 S8 後に確定。
 DEFAULT_PSSI_MAP: dict[CueType, set[int]] = {
@@ -158,11 +159,13 @@ def analyze_file(
     intro_outro: dict | None = None,
     legacy_vocal_start: bool = False,
     legacy_vocal_end: bool = False,
+    audio_input: AudioInput | None = None,
 ) -> AnalysisResult:
     """音源ファイルをデコードして解析する（soundfile/librosa 必須）。"""
     from .decode import decode_mono
-    from .fingerprint import file_analysis_inputs
 
+    audio_input = audio_input or AudioInput.read(path)
+    audio_input.verify(path)
     decoded = decode_mono(path)
     legacy_vocal_start = legacy_vocal_start and intro_outro is None and cue_targets is None
     legacy_vocal_end = legacy_vocal_end and intro_outro is None and cue_targets is None
@@ -173,7 +176,9 @@ def analyze_file(
     vocal_requested = legacy_vocal_start or bool(cue_targets and "VOCAL_START" in cue_targets)
     end_requested = legacy_vocal_end or bool(cue_targets and "VOCAL_END" in cue_targets)
     vocal_end = vocal_end_from_stems(stem_analysis) if end_requested and stem_analysis is not None else None
-    fp, payload, lyric_warnings = file_analysis_inputs(path, vocal_requested=vocal_requested, stem_analysis=stem_analysis)
+    fp, payload, lyric_warnings = file_analysis_inputs(
+        path, vocal_requested=vocal_requested, stem_analysis=stem_analysis, audio_input=audio_input,
+    )
     vocal_start = lyric_start(payload.decode("utf-8-sig", errors="replace"), decoded.duration_sec) if payload is not None else None
     vocal_source = "LRC"
     if vocal_start is None and stem_analysis is not None and vocal_requested:
@@ -215,4 +220,5 @@ def analyze_file(
             candidates=result.candidates,
             warnings=result.warnings + ("無音の可能性があります",),
         )
+    audio_input.verify(path)
     return result

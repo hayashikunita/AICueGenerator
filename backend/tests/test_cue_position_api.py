@@ -110,7 +110,7 @@ def test_manual_addition_forks_only_target_history_and_preserves_decisions(cue_h
     assert copied["accepted"] and copied["time_ms"] == 1137 and copied["cue_kind"] == "MEMORY"
     with Repository(get_settings().db_path) as repo:
         cached = repo.find_cached_run(track_id=track, engine_version="position-test", fingerprint=fingerprint, params={})
-        assert cached["id"] == run
+        assert cached["id"] == manual["run_id"]
         summary = repo.get_feature_summary(manual["run_id"])
         import json
         assert json.loads(summary["beat_times_json"]) == times
