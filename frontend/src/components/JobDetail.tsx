@@ -24,6 +24,8 @@ export function JobDetail({
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [activeTrackId, setActiveTrackId] = useState("");
   const [trackFilter, setTrackFilter] = useState("all");
+  const [scopeChoice, setScopeChoice] = useState<"NEW" | "ALL" | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
   const [tracks, setTracks] = useState<JobTrack[]>([]);
   const [log, setLog] = useState<string[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -65,6 +67,7 @@ export function JobDetail({
     setTracks([]);
     setActiveTrackId("");
     setTrackFilter("all");
+    setScopeChoice(null);
     setLog([]);
     setErr(null);
     refreshJob();
@@ -137,13 +140,20 @@ export function JobDetail({
   const configuredCandidates = useMemo(() => candidates.map((candidate) => ({ ...candidate,
     display_label: job?.params?.cue_mode === "INTRO_OUTRO" && job.params.intro_outro ? introOutroLabel(candidate.type as CueTarget, job.params.intro_outro) : undefined,
     preset: job?.params?.cue_settings?.[candidate.type] ?? job?.params?.cue_default })), [candidates, job?.params]);
-  const high = candidates.filter((c) => c.band === "high").length;
-  const review = candidates.filter((c) => c.band === "review").length;
-  const accepted = candidates.filter((c) => c.accepted === true).length;
-  const memoryCount = candidates.filter((c) => c.accepted === true && (c.cue_kind === "MEMORY" || c.cue_kind === "BOTH")).length;
-  const hotCount = candidates.filter((c) => c.accepted === true && (c.cue_kind === "HOT" || c.cue_kind === "BOTH")).length;
-  const decisionKey = candidates.map((c) => `${c.id}:${c.accepted}:${c.cue_kind}:${c.time_ms}`).join("|");
-  const activeTrack = tracks.find((track) => track.id === activeTrackId) ?? tracks[0];
+  const newTracks = useMemo(() => tracks.filter((track) => !track.analysis?.cached), [tracks]);
+  const scope = scopeChoice ?? (!running && reusedTracks > 0 && newTracks.length > 0 ? "NEW" : "ALL");
+  const groupTracks = scope === "NEW" ? newTracks : tracks;
+  const groupIds = useMemo(() => new Set(groupTracks.map((track) => track.id)), [groupTracks]);
+  const groupCandidates = useMemo(() => configuredCandidates.filter((candidate) => !candidate.track_id || groupIds.has(candidate.track_id)), [configuredCandidates, groupIds]);
+  const scopeLabel = scope === "NEW" ? `今回追加した${newTracks.length}曲` : `全${tracks.length}曲`;
+  const scopeKey = `${scope}:${groupTracks.map((track) => track.id).join("|")}`;
+  const high = groupCandidates.filter((c) => c.band === "high").length;
+  const review = groupCandidates.filter((c) => c.band === "review").length;
+  const accepted = groupCandidates.filter((c) => c.accepted === true).length;
+  const memoryCount = groupCandidates.filter((c) => c.accepted === true && (c.cue_kind === "MEMORY" || c.cue_kind === "BOTH")).length;
+  const hotCount = groupCandidates.filter((c) => c.accepted === true && (c.cue_kind === "HOT" || c.cue_kind === "BOTH")).length;
+  const decisionKey = groupCandidates.map((c) => `${c.id}:${c.accepted}:${c.cue_kind}:${c.time_ms}`).join("|");
+  const activeTrack = groupTracks.find((track) => track.id === activeTrackId) ?? groupTracks[0];
   const audioUrl = activeTrack?.status === "COMPLETED" ? api.audioUrl(activeTrack.id) : null;
   const multiTrack = tracks.length > 1;
   const trackNames = Object.fromEntries(tracks.map((track) => {
@@ -151,11 +161,12 @@ export function JobDetail({
     const duplicates = tracks.filter((t) => trackName(t.path, t.title, t.artist).toLowerCase() === name.toLowerCase()).length > 1;
     return [track.id, duplicates ? `${name} · ${track.path.split(/[\\/]/).slice(-2, -1)[0] ?? ""} [${track.content_id}]` : name];
   }));
-  const scopedCandidates = useMemo(() => trackFilter === "all" ? configuredCandidates : configuredCandidates.filter((c) => c.track_id === trackFilter), [trackFilter, configuredCandidates]);
-  const audioCandidates = useMemo(() => multiTrack ? configuredCandidates.filter((c) => c.track_id === activeTrack?.id) : configuredCandidates, [multiTrack, configuredCandidates, activeTrack?.id]);
-  const trackLocked = pendingDecisions > 0 || manualBusy || drafting;
+  const effectiveFilter = groupIds.has(trackFilter) ? trackFilter : "all";
+  const scopedCandidates = useMemo(() => effectiveFilter === "all" ? groupCandidates : groupCandidates.filter((c) => c.track_id === effectiveFilter), [effectiveFilter, groupCandidates]);
+  const audioCandidates = useMemo(() => groupCandidates.filter((c) => !c.track_id || c.track_id === activeTrack?.id), [groupCandidates, activeTrack?.id]);
+  const trackLocked = pendingDecisions > 0 || manualBusy || drafting || exportBusy;
   const countsByTrack = new Map<string, { memory: number; hot: number }>();
-  for (const c of candidates) if (c.accepted) {
+  for (const c of groupCandidates) if (c.accepted) {
     const id = c.track_id ?? activeTrack?.id ?? "single";
     const counts = countsByTrack.get(id) ?? { memory: 0, hot: 0 };
     if (c.cue_kind === "MEMORY" || c.cue_kind === "BOTH") counts.memory++;
@@ -165,12 +176,19 @@ export function JobDetail({
   const cueCounts = Array.from(countsByTrack, ([trackId, counts]) => ({ trackId, title: trackNames[trackId] ?? trackName(job?.track_path, job?.track_title, job?.track_artist), ...counts }));
   const audition = (time_ms: number, trackId?: string | null) => {
     if (manualBusy || pendingDecisions > 0) return;
-    const track = tracks.find((t) => t.id === trackId) ?? activeTrack;
+    const track = groupTracks.find((t) => t.id === trackId) ?? activeTrack;
     if (!track || track.status !== "COMPLETED") return;
     setActiveTrackId(track.id);
     setPlaybackMs(time_ms);
     setSeekRequest({ time_ms, sequence: ++seekSequence.current });
     document.getElementById("result-timeline")?.scrollIntoView({ block: "nearest" });
+  };
+  const changeScope = (next: "NEW" | "ALL") => {
+    setScopeChoice(next);
+    setTrackFilter("all");
+    setActiveTrackId("");
+    setPlaybackMs(0);
+    setSeekRequest(null);
   };
 
   return (
@@ -196,7 +214,7 @@ export function JobDetail({
                 {cancelling ? "停止中…" : "解析をキャンセル"}
               </button>
             )}
-            <button className="secondary tiny" disabled={downloading || !candidates.length} onClick={async () => { setDownloading(true); try { await api.downloadReport(jobId); } catch (e) { toast.push("error", String(e)); } finally { setDownloading(false); } }}>{downloading ? "取得中…" : "CSV を保存"}</button>
+            <button className="secondary tiny" disabled={downloading || !groupCandidates.length || !groupTracks.length} onClick={async () => { setDownloading(true); try { await api.downloadReport(jobId, groupTracks.map((track) => track.id)); } catch (e) { toast.push("error", String(e)); } finally { setDownloading(false); } }}>{downloading ? "取得中…" : "CSV を保存"}</button>
           </div>
         </div>
 
@@ -212,7 +230,7 @@ export function JobDetail({
             <div className="stat-label">完了した曲</div>
           </div>
           <div className="stat">
-            <div className="stat-val">{candidates.length}</div>
+            <div className="stat-val">{groupCandidates.length}</div>
             <div className="stat-label">候補</div>
           </div>
           <div className="stat">
@@ -232,12 +250,21 @@ export function JobDetail({
         </div>
 
         {running && job && <AnalysisProgress job={job} tracks={tracks} />}
+        {!running && tracks.length > 0 && <div className="result-scope" aria-label="確認・書き出しの対象">
+          <div className="source-switch">
+            <button type="button" className={scope === "NEW" ? "" : "secondary"} aria-pressed={scope === "NEW"} disabled={trackLocked || newTracks.length === 0} onClick={() => changeScope("NEW")}>今回追加した{newTracks.length}曲</button>
+            <button type="button" className={scope === "ALL" ? "" : "secondary"} aria-pressed={scope === "ALL"} disabled={trackLocked} onClick={() => changeScope("ALL")}>全{tracks.length}曲</button>
+          </div>
+          <p className="field-help" role="status">確認・書き出し対象：{scopeLabel}。候補の確認、XML・CSVの書き出しに共通です。</p>
+          {newTracks.length === 0 && <p className="field-help">今回は全曲が保存済みのため、「全曲」で結果を表示しています。</p>}
+          {trackLocked && <p className="field-help">保存・書き出し中の処理、または位置の調整を完了・破棄すると対象を切り替えられます。</p>}
+        </div>}
         {multiTrack && <div className="batch-results" aria-label="曲ごとの解析結果">
-          <div className="section-heading"><h3>確認する曲</h3><button type="button" className="secondary tiny" aria-pressed={trackFilter === "all"} disabled={trackLocked} onClick={() => setTrackFilter("all")}>全曲の候補を表示</button></div>
+          <div className="section-heading"><h3>確認する曲</h3><button type="button" className="secondary tiny" aria-pressed={effectiveFilter === "all"} disabled={trackLocked} onClick={() => setTrackFilter("all")}>全曲の候補を表示</button></div>
           <p className="field-help">曲を選ぶと試聴と候補が切り替わります。全曲表示からも候補の「試聴」で対象曲を再生できます。</p>
-          <div className="batch-result-list">{tracks.map((track) => {
-            const own = candidates.filter((c) => c.track_id === track.id);
-            return <button type="button" key={track.id} className={`secondary result-track ${trackFilter === track.id ? "selected" : ""}`} aria-pressed={trackFilter === track.id} disabled={trackLocked} onClick={() => { setActiveTrackId(track.id); setTrackFilter(track.id); setPlaybackMs(0); setSeekRequest(null); }}>
+          <div className="batch-result-list">{groupTracks.map((track) => {
+            const own = groupCandidates.filter((c) => c.track_id === track.id);
+            return <button type="button" key={track.id} className={`secondary result-track ${effectiveFilter === track.id ? "selected" : ""}`} aria-pressed={effectiveFilter === track.id} disabled={trackLocked} onClick={() => { setActiveTrackId(track.id); setTrackFilter(track.id); setPlaybackMs(0); setSeekRequest(null); }}>
               <strong>{trackNames[track.id]}</strong><span>{track.analysis?.cached ? "解析済みを再利用" : jobStatus(track.status, track.status === "FAILED" ? 1 : 0)} · 候補 {own.length} · 採用 {own.filter((c) => c.accepted).length}</span>{track.analysis?.reason && <span className="error">{track.analysis.reason}</span>}
             </button>;
           })}</div>
@@ -267,23 +294,23 @@ export function JobDetail({
         )}
       </div>
 
-      {(candidates.length > 0 || audioUrl) && (
+      {(groupCandidates.length > 0 || audioUrl) && (
         <div className="panel" id="result-timeline">
           <h2>タイムライン{multiTrack && activeTrack ? `：${trackNames[activeTrack.id]}` : ""}</h2>
           <Timeline key={`timeline-${activeTrack?.id ?? "empty"}`} candidates={audioCandidates} audioUrl={audioUrl} seekRequest={seekRequest} onPositionChange={setPlaybackMs} />
-          {!running && activeTrack?.status === "COMPLETED" && <ManualCueForm key={`manual-${activeTrack.id}`} jobId={jobId} trackId={activeTrack.id} currentTimeMs={playbackMs} disabled={pendingDecisions > 0 || drafting} onBusy={setManualBusy} onAdded={async () => { await Promise.all([loadCandidates(), loadTracks()]); }} />}
+          {!running && activeTrack?.status === "COMPLETED" && <ManualCueForm key={`manual-${activeTrack.id}`} jobId={jobId} trackId={activeTrack.id} currentTimeMs={playbackMs} disabled={pendingDecisions > 0 || drafting || exportBusy} onBusy={setManualBusy} onAdded={async () => { await Promise.all([loadCandidates(), loadTracks()]); }} />}
         </div>
       )}
 
       <div className="panel">
         <h2>2. キュー候補を確認・採用 <span className="muted">（採用 {accepted} 候補）</span></h2>
         <div className="cue-kind-counts" aria-live="polite"><span><CueKindSwatch kind="MEMORY" />Memory Cue <b>{memoryCount}</b> 件</span><span><CueKindSwatch kind="HOT" />Hot Cue <b>{hotCount}</b> 件</span></div>
-        <CandidateTable key={trackFilter} jobId={!running ? jobId : undefined} candidates={scopedCandidates} trackNames={multiTrack ? trackNames : undefined} onBatchChanged={setCandidates} onChanged={(id, accepted, cueKind, position) => {
+        <CandidateTable key={`${scopeKey}:${effectiveFilter}`} jobId={!running ? jobId : undefined} candidates={scopedCandidates} trackNames={multiTrack ? trackNames : undefined} onBatchChanged={setCandidates} onChanged={(id, accepted, cueKind, position) => {
           setCandidates((current) => current.map((c) => c.id === id ? { ...c, accepted, cue_kind: cueKind, original_time_ms: c.original_time_ms ?? c.time_ms, time_ms: position.time_ms, beat: position.beat } : c));
-        }} onSavingChange={(delta) => setPendingDecisions((n) => n + delta)} disabled={manualBusy} onDraftChange={setDrafting} onAudition={tracks.some((t) => t.status === "COMPLETED") ? audition : undefined} />
+        }} onSavingChange={(delta) => setPendingDecisions((n) => n + delta)} disabled={manualBusy || exportBusy} onDraftChange={setDrafting} onAudition={tracks.some((t) => t.status === "COMPLETED") ? audition : undefined} />
       </div>
 
-      <WritePlanPanel key={decisionKey} jobId={jobId} acceptedCount={accepted} memoryCount={memoryCount} hotCount={hotCount} cueCounts={cueCounts} trackNames={trackNames} candidates={configuredCandidates} onAudition={tracks.some((track) => track.status === "COMPLETED") ? audition : undefined} deciding={pendingDecisions > 0 || manualBusy || running || drafting} />
+      <WritePlanPanel key={`${scopeKey}:${decisionKey}`} jobId={jobId} acceptedCount={accepted} memoryCount={memoryCount} hotCount={hotCount} cueCounts={cueCounts} trackNames={Object.fromEntries(groupTracks.map((track) => [track.id, trackNames[track.id]]))} candidates={groupCandidates} trackIds={groupTracks.map((track) => track.id)} scopeLabel={scopeLabel} onBusyChange={setExportBusy} onAudition={tracks.some((track) => track.status === "COMPLETED") ? audition : undefined} deciding={pendingDecisions > 0 || manualBusy || running || drafting} />
     </div>
   );
 }

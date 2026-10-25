@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from ..analysis.pipeline import analyze_file
-from ..analysis.fingerprint import AudioInput, file_analysis_inputs
+from ..analysis.fingerprint import AudioInput
+from ..analysis.reuse import find_reusable_run, voice_options, with_source_fingerprint
 from ..analysis.ai import analyze_stems, load_cached_stems, AnalysisCancelled
 from ..analysis.vocals import vocal_start_from_stems, vocal_end_from_stems
 from ..common import ENGINE_VERSION, dumps, loads, utcnow_iso
@@ -141,25 +142,20 @@ def _process_track(
             analysis["phrase_used"] = bool(phrase_boundaries)
             repo.set_job_track_analysis(job_id, track_id, analysis)
         stems = None
-        specialized = params.get("cue_mode") == "INTRO_OUTRO"
-        voice_targets = (params.get("intro_outro") or {}).get("targets", []) if specialized else params.get("cue_targets") or [target for target, enabled in (("VOCAL_START", params.get("legacy_vocal_start")), ("VOCAL_END", params.get("legacy_vocal_end"))) if enabled]
-        vocal_requested = bool({"VOCAL_START", "VOCAL_END"}.intersection(voice_targets))
-        require_end = "VOCAL_END" in voice_targets
+        options = voice_options(params)
+        specialized = options.specialized
+        require_end = options.require_end
         analysis["vocal_end_requested"] = require_end
-        needs_ai = params.get("analysis_quality") == "AI" and (not specialized or vocal_requested)
-        vocal_only = params.get("ai_scope") == "VOCAL"
+        needs_ai = options.needs_ai
+        vocal_only = options.vocal_only
         if needs_ai:
             stems = load_cached_stems(path, vocal_only=vocal_only, require_end=require_end, audio_input=audio_input)
         # Existing runs use the same fingerprint, so they can also be reused
         # before any decoding, feature extraction, or AI inference starts.
         if not needs_ai or stems is not None:
-            fingerprint, _, _ = file_analysis_inputs(
-                path, vocal_requested="VOCAL_START" in voice_targets, stem_analysis=stems, audio_input=audio_input,
-            )
-            if source_fingerprint:
-                fingerprint = "sha256:" + hashlib.sha256((fingerprint + source_fingerprint).encode("ascii")).hexdigest()
-            cached = repo.find_cached_run(
-                track_id=track_id, engine_version=ENGINE_VERSION, fingerprint=fingerprint, params=params,
+            cached = find_reusable_run(
+                repo, track_id, path, params, audio_input=audio_input, source_fingerprint=source_fingerprint, stem_analysis=stems,
+                engine_version=ENGINE_VERSION,
             )
             if cached is not None:
                 audio_input.verify(path)
@@ -197,9 +193,7 @@ def _process_track(
         if specialized:
             analysis.update(cue_mode="INTRO_OUTRO", analysis_quality="AI" if stems is not None else "STANDARD", section_labels_used=any(s.kind in {"INTRO", "OUTRO"} for s in phrase_sections))
         analysis.pop("stage", None)
-        fingerprint = result.fingerprint
-        if source_fingerprint:
-            fingerprint = "sha256:" + hashlib.sha256((fingerprint + source_fingerprint).encode("ascii")).hexdigest()
+        fingerprint = with_source_fingerprint(result.fingerprint, source_fingerprint)
         analysis.update(available=True, bpm=result.beatgrid.bpm, beat_source=result.beatgrid.source.value,
                         beat_count=result.beatgrid.beat_count, downbeat_count=len(result.beatgrid.downbeat_indices), duration_ms=round(result.duration_sec * 1000))
         analysis["warnings"] = list(analysis.get("warnings", [])) + list(result.warnings)

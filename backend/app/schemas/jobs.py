@@ -87,6 +87,20 @@ class CreateJobResponse(BaseModel):
     job_id: str
 
 
+class PreviewTrackOut(BaseModel):
+    content_id: str
+    state: Literal["CACHED", "NEW", "UNAVAILABLE"]
+    reason: str | None = None
+
+
+class PreviewJobResponse(BaseModel):
+    total: int
+    cached: int
+    new: int
+    unavailable: int
+    tracks: list[PreviewTrackOut]
+
+
 class RekordboxTrack(BaseModel):
     content_id: str
     title: str | None = None
@@ -263,6 +277,7 @@ class CollectionXmlResponse(BaseModel):
 
 class BuildPlanRequest(BaseModel):
     job_id: str
+    track_ids: list[str] | None = Field(default=None, min_length=1, max_length=200)
     memory_candidate_ids: list[str] | None = Field(default=None, max_length=2000)
     mode: Literal["COPY", "EXISTING"] = "COPY"
     source_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
@@ -299,6 +314,7 @@ class ExecutePlanResponse(BaseModel):
 
 class ExportXmlRequest(BaseModel):
     job_id: str
+    track_ids: list[str] | None = Field(default=None, min_length=1, max_length=200)
     cue_colors: CueExportColors | None = None
     memory_candidate_ids: list[str] | None = Field(default=None, max_length=2000)
     mode: Literal["COPY", "EXISTING"] = "COPY"

@@ -101,6 +101,46 @@ def test_additive_xml_preserves_original_track_grid_cues_loops_and_slots(existin
     assert [dict(row) for row in repo.list_candidates_for_job(body["job_id"])] == before
 
 
+def test_existing_export_scopes_originals_and_requires_new_confirmation_when_scope_changes(existing_job, tmp_path):
+    client, repo, body, snapshot, first, _, original_track, source_bytes, first_run = existing_job
+    second_audio = tmp_path / "Second.wav"
+    second_audio.write_bytes(Path(snapshot[first]["detail"]["path"]).read_bytes())
+    second = repo.upsert_track(content_id=new_id(), path=str(second_audio), fmt="WAV")
+    second_run = repo.create_run(track_id=second, engine_version="existing-test", params={}, fingerprint=new_id(), beat_source="ANLZ", pssi_used=True)
+    candidate = repo.add_candidates(second_run, [{"type": "INTRO_END", "time_ms": 1500, "confidence": 85, "rank": 1}])[0]
+    repo.finish_run(second_run, status="COMPLETED")
+    repo.upsert_decision(candidate_id=candidate, accepted=True, cue_kind="MEMORY")
+    job = repo.create_job(params={}, track_ids=[first, second])
+    repo.set_job_status(job, "COMPLETED")
+    for tid, run in ((first, first_run), (second, second_run)):
+        repo.set_job_track_analysis(job, tid, {"available": True}, run)
+    snapshot[second] = deepcopy(snapshot[first])
+    snapshot[second]["detail"]["path"] = str(second_audio)
+    root = ET.fromstring(source_bytes)
+    second_xml = deepcopy(original_track)
+    second_xml.set("TrackID", "5678")
+    second_xml.set("Location", second_audio.as_uri())
+    root.find("COLLECTION").append(second_xml)
+    root.find("COLLECTION").set("Entries", "3")
+    uploaded = client.post("/api/v1/write/source-xml", headers=auth(), json={"filename": "two.xml", "xml_text": ET.tostring(root, encoding="unicode")}).json()
+    body = {**body, "job_id": job, "source_id": uploaded["source_id"]}
+    full_plan = preview(client, body)
+    assert {row["track_id"] for row in full_plan["track_updates"]} == {first, second}
+    selected = {**body, "track_ids": [second]}
+    response = client.post("/api/v1/write/export-xml", headers=auth(), json={**selected, "confirmation_hash": full_plan["confirmation_hash"]})
+    assert response.status_code == 400
+    # Hidden originals, including their conflicts, must not enter the selected export.
+    snapshot[first]["cues"][2]["ActiveLoop"] = 1
+    assert preview(client, body)["conflict"] > 0
+    plan = preview(client, selected)
+    assert plan["conflict"] == 0 and plan["add"] == 1 and plan["preserved"] == 3
+    assert {row["track_id"] for row in plan["track_updates"]} == {second}
+    response = client.post("/api/v1/write/export-xml", headers=auth(), json={**selected, "confirmation_hash": plan["confirmation_hash"]})
+    assert response.status_code == 200, response.text
+    output = ET.parse(response.json()["xml_path"]).findall("COLLECTION/TRACK")
+    assert len(output) == 1 and output[0].get("Location") == second_audio.as_uri()
+
+
 @pytest.mark.parametrize("change", ["cue", "grid", "color"])
 def test_change_after_preview_requires_confirmation_again(existing_job, change):
     client, _, body, snapshot, tid, _, _, _, _ = existing_job

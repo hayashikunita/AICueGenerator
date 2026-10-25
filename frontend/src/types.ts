@@ -56,6 +56,14 @@ export interface TrackInput {
   writable?: boolean;
 }
 
+export interface JobPreview {
+  total: number;
+  cached: number;
+  new: number;
+  unavailable: number;
+  tracks: { content_id: string; state: "CACHED" | "NEW" | "UNAVAILABLE"; reason: string | null }[];
+}
+
 export interface RekordboxTrack {
   content_id: string;
   title: string | null;

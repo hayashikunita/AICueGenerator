@@ -123,6 +123,59 @@ def test_multitrack_export_retains_same_named_audio_and_prior_exports(batch_job)
     assert all(repo.get_track(t)["content_id"] in report for t in tracks)
 
 
+def test_scoped_plan_xml_and_csv_only_include_selected_tracks(batch_job):
+    client, repo, job, tracks, ids = batch_job
+    assert accept(client, job, ids[0][:2] + ids[1][:3], "BOTH").status_code == 200
+    body = {"job_id": job, "track_ids": [tracks[1]]}
+    plan = client.post("/api/v1/write/plan", headers=auth(), json=body)
+    assert plan.status_code == 200, plan.text
+    assert plan.json()["add"] == 6
+    assert {row["track_id"] for row in plan.json()["items"]} == {tracks[1]}
+    response = client.post("/api/v1/write/export-xml", headers=auth(), json=body)
+    assert response.status_code == 200, response.text
+    assert (response.json()["tracks"], response.json()["cues"], response.json()["copied"]) == (1, 6, 1)
+    xml_tracks = ET.parse(response.json()["xml_path"]).findall("COLLECTION/TRACK")
+    assert len(xml_tracks) == 1
+    report = client.get(f"/api/v1/jobs/{job}/export.csv", headers=auth(), params={"track_ids": tracks[1]})
+    assert report.status_code == 200
+    assert repo.get_track(tracks[1])["content_id"] in report.text
+    assert repo.get_track(tracks[0])["content_id"] not in report.text
+    # Selecting a single track must not change decisions on the hidden track.
+    assert all(repo.get_candidate(cid)["accepted"] for cid in ids[0][:2])
+
+
+@pytest.mark.parametrize("scope", ["empty", "duplicate", "foreign"])
+def test_export_scope_rejects_invalid_tracks_even_without_accepted_cues(batch_job, scope):
+    client, _, job, tracks, _ = batch_job
+    selected = [] if scope == "empty" else [tracks[0], tracks[0]] if scope == "duplicate" else ["outside-job"]
+    for endpoint in ("plan", "export-xml"):
+        response = client.post(f"/api/v1/write/{endpoint}", headers=auth(), json={"job_id": job, "track_ids": selected})
+        assert response.status_code == (422 if scope == "empty" else 400), response.text
+    if selected:
+        assert client.get(f"/api/v1/jobs/{job}/export.csv", headers=auth(), params=[("track_ids", t) for t in selected]).status_code == 400
+
+
+def test_scope_rejects_memory_selection_from_hidden_tracks(batch_job):
+    client, _, job, tracks, ids = batch_job
+    assert accept(client, job, ids[0][:1] + ids[1][:1]).status_code == 200
+    body = {"job_id": job, "track_ids": tracks[1:], "memory_candidate_ids": ids[0][:1]}
+    for endpoint in ("plan", "export-xml"):
+        assert client.post(f"/api/v1/write/{endpoint}", headers=auth(), json=body).status_code == 400
+
+
+def test_preview_endpoint_validates_auth_and_creates_no_job(batch_job):
+    client, repo, _, tracks, _ = batch_job
+    row = repo.get_track(tracks[0])
+    body = {"tracks": [{"content_id": row["content_id"], "path": row["path"]}]}
+    before = len(repo.list_jobs())
+    assert client.post("/api/v1/jobs/preview", json=body).status_code == 401
+    response = client.post("/api/v1/jobs/preview", headers=auth(), json=body)
+    assert response.status_code == 200, response.text
+    assert (response.json()["total"], response.json()["new"]) == (1, 1)
+    assert len(repo.list_jobs()) == before
+    assert client.post("/api/v1/jobs/preview", headers=auth(), json={"tracks": body["tracks"] * 2}).status_code == 422
+
+
 def test_create_rejects_duplicate_tracks_before_job_creation(batch_job):
     client, repo, job, tracks, _ = batch_job
     row = repo.get_track(tracks[0])

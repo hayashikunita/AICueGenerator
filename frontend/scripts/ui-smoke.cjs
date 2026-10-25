@@ -19,6 +19,7 @@ let aiAvailable=true;
 let vocalScanAvailable=true;
 let aiProgressPercent=34;
 let aiScanStart=0;
+let preflightCachedIds=null, preflightDelay=0, preflightFailure=false, preflightUnavailable=null, incrementalFixture=false, incrementalRuns=0;
 function existingReview(data) {
   const tid='purpose-track';
   const chosen=xmlEntries(data).map(item=>({...item,track_id:tid}));
@@ -35,7 +36,7 @@ function existingReview(data) {
 }
 const memoryScores = [10,95,20,85,70,65,40,90,75,60,55,100,15,80,50];
 function xmlEntries(data) {
-  return candidates.filter(c=>c.accepted).flatMap(c=>{
+  return candidates.filter(c=>c.accepted && (!data.track_ids || !c.track_id || data.track_ids.includes(c.track_id))).flatMap(c=>{
     const kinds=[];
     if((c.cue_kind==='MEMORY'||c.cue_kind==='BOTH') && (!data.memory_candidate_ids || data.memory_candidate_ids.includes(c.id))) kinds.push('MEMORY');
     if(c.cue_kind==='HOT'||c.cue_kind==='BOTH') kinds.push('HOT');
@@ -88,6 +89,14 @@ const server = http.createServer(async (req, res) => {
     const plan=existingReview(data);assert.equal(plan.conflict,0);existingExports++;lastExport=data;
     result={mode:'EXISTING',folder:'C:/AppData/exports/existing',xml_path:'C:/AppData/exports/existing/rekordbox.xml',backup_xml_path:'C:/AppData/exports/existing/original_collection.xml',tracks:1,cues:plan.add+plan.preserved,added_cues:plan.add,preserved_cues:3,duplicates_skipped:plan.duplicates_skipped,copied:0,skipped:[],warnings:[],cue_colors:data.cue_colors,cue_settings_used:true};
   }
+  else if (url.pathname === '/api/v1/jobs/preview') {
+    assert.equal(req.headers.authorization,'Bearer ux-test');
+    const delay=preflightDelay;
+    const rows=data.tracks.map((track,i)=>({content_id:track.content_id,state:preflightUnavailable===track.content_id?'UNAVAILABLE':(preflightCachedIds?preflightCachedIds.has(track.content_id):data.tracks.length>1&&i===0)?'CACHED':'NEW',reason:preflightUnavailable===track.content_id?'Test audio missing':null}));
+    if(delay) await sleep(delay);
+    if(preflightFailure) {res.writeHead(500,{'Content-Type':'application/json'});res.end(JSON.stringify({detail:'Test preview failure'}));return;}
+    result={total:rows.length,cached:rows.filter(t=>t.state==='CACHED').length,new:rows.filter(t=>t.state==='NEW').length,unavailable:rows.filter(t=>t.state==='UNAVAILABLE').length,tracks:rows};
+  }
   else if (url.pathname === '/api/v1/jobs' && req.method === 'POST') {
     created = data; jobs[0].params = data.params;
     batchMode=data.tracks.length>1;
@@ -95,9 +104,10 @@ const server = http.createServer(async (req, res) => {
     if (data.tracks.length > 1) {
       batchMode = true;
       jobs[0].total = jobs[0].completed = data.tracks.length;
-      batchTracks = data.tracks.map((t,i)=>({...t,id:'batch-'+i,status:'COMPLETED',duration_ms:30000,analysis:{source:'REKORDBOX',available:true,cached:i===0,bpm:120+i*10,beat_count:60,downbeat_count:15,phrase_count:6,warnings:[]}}));
+      batchTracks = data.tracks.map((t,i)=>({...t,id:'batch-'+i,status:'COMPLETED',duration_ms:30000,analysis:{source:'REKORDBOX',available:true,cached:preflightCachedIds?preflightCachedIds.has(t.content_id):i===0,bpm:120+i*10,beat_count:60,downbeat_count:15,phrase_count:6,warnings:[]}}));
       batchCandidates = batchTracks.flatMap((t,index)=>(data.params.intro_outro?.targets??data.params.cue_targets).map((type,i)=>({id:`batch-cue-${index}-${i}`,track_id:t.id,run_id:'batch-run-'+index,type,time_ms:4000+i*(data.params.cue_mode==='INTRO_OUTRO'?1000:6000),original_time_ms:4000+i*(data.params.cue_mode==='INTRO_OUTRO'?1000:6000),confidence:type==='VOCAL_START'?30:85,rank:1,beat:8,band:type==='VOCAL_START'?'reject':'high',evidence:[],accepted:null,cue_kind:null})));
       if(memoryOverflowFixture) batchCandidates = batchTracks.flatMap((t,index)=>memoryScores.map((confidence,i)=>({id:`overflow-${index}-${i}`,track_id:t.id,run_id:'overflow-run-'+index,type:data.params.cue_targets[i%data.params.cue_targets.length],time_ms:i*1000,original_time_ms:i*1000,confidence,rank:i+1,beat:i*2,band:confidence>=66?'high':confidence>=40?'review':'reject',evidence:[],accepted:null,cue_kind:null})));
+      if(incrementalFixture) batchCandidates.forEach(c=>{if(batchTracks.find(t=>t.id===c.track_id).analysis.cached) Object.assign(c,{accepted:true,cue_kind:"MEMORY"});});
       candidates = batchCandidates;
     } else if (data.params.cue_mode==='INTRO_OUTRO') {
       purposeMode=true;
@@ -110,7 +120,7 @@ const server = http.createServer(async (req, res) => {
       candidates = data.params.cue_targets.map((type,i)=>({id:'purpose-'+i,run_id:'purpose-run',type,time_ms:({CHORUS_START:4000,CHORUS_END:24000,CHORUS_END_MINUS_8_BARS:8000,VOCAL_START:6000,VOCAL_END:26000,INTRO_START:0,INTRO_END:2000,OUTRO:27500,OUTRO_END:28000})[type],confidence:type==='VOCAL_START'?30:85,rank:1,beat:8,band:type==='VOCAL_START'?'reject':'high',evidence:[{name:'候補の位置と根拠',weight:100,score:type==='VOCAL_START'?.3:.85,detail:type==='VOCAL_START'?'Verse先頭の仮候補です。歌声は検出していません。':'rekordbox の Chorus フレーズ境界'}],accepted:null,cue_kind:null}));
       candidates.forEach(c=>c.original_time_ms=c.time_ms);
     }
-    const jobId = batchMode ? memoryOverflowFixture ? 'batch-overflow' : 'batch' : 'one';
+    const jobId = incrementalFixture ? 'incremental-'+(++incrementalRuns) : batchMode ? memoryOverflowFixture ? 'batch-overflow' : 'batch' : 'one';
     if(batchMode) jobs.push({...jobs[0],id:jobId});
     result = { job_id: jobId };
   }
@@ -144,7 +154,7 @@ const server = http.createServer(async (req, res) => {
   }
   else if (url.pathname.endsWith('/grid/apply')) { assert.equal(data.plan_id,'a'.repeat(32)); assert.equal(gridRunning,false); await sleep(250); gridSaves++; gridOffset++; result={ok:true,message:'小節頭を保存しました。rekordbox を起動して曲を読み込み直してください。',backup_dir:'C:/AppData/grid-backups/test'}; }
   else if (url.pathname.endsWith('/grid')) result = gridPreview(1);
-  else if (batchMode && url.pathname.endsWith('/write/export-xml')) {lastExport=data;result={folder:'C:/AppData/exports/test-batch',xml_path:'C:/AppData/exports/test-batch/rekordbox.xml',tracks:batchTracks.length,cues:xmlEntries(data).length,copied:batchTracks.length,skipped:[],cue_colors:data.cue_colors,warnings:[]};}
+  else if (batchMode && url.pathname.endsWith('/write/export-xml')) {lastExport=data;result={folder:'C:/AppData/exports/test-batch',xml_path:'C:/AppData/exports/test-batch/rekordbox.xml',tracks:data.track_ids?.length??batchTracks.length,cues:xmlEntries(data).length,copied:data.track_ids?.length??batchTracks.length,skipped:[],cue_colors:data.cue_colors,warnings:[]};}
   else if (url.pathname === '/api/v1/jobs/ai-progress/tracks') result = {tracks:[{id:'ai-progress-track',content_id:'AI1',path:'C:/Music/Long song.wav',title:'Long song',format:'WAV',status:jobs.find(j=>j.id==='ai-progress').status==='RUNNING'?'RUNNING':'COMPLETED',duration_ms:440000,
     analysis:{source:'REKORDBOX',available:false,analysis_quality:'AI',ai_scope:jobs.find(j=>j.id==='ai-progress').params.ai_scope??'FULL',ai_started_at:new Date(Date.now()-103000).toISOString(),stage:'AIで音源を分離しています。',
       ai_progress:{phase:'SEPARATING',percent:aiProgressPercent,elapsed_sec:103,remaining_sec:197,
@@ -155,7 +165,7 @@ const server = http.createServer(async (req, res) => {
     await sleep(100);
     result = url.pathname.includes('/playlist-50/') ? {source:'REKORDBOX',available:false,reason:'BPM / Grid を解析してから再取得してください',warnings:[]} : {source:'REKORDBOX',available:true,bpm:129.25,key:'Am',beat_count:384,downbeat_count:96,phrase_count:12,existing_cues:[{time_ms:10000,kind:0,comment:'Existing'}],warnings:[]};
   }
-  else if (url.pathname.endsWith('/tracks') && !url.pathname.includes('rekordbox')) result = { tracks: purposeMode && url.pathname.includes('/one/') ? [{id:'purpose-track',content_id:'RB1',path:'C:/Music/Library.wav',format:'WAV',status:'COMPLETED',duration_ms:30000,analysis:{source:'REKORDBOX',available:true,bpm:120,beat_count:60,downbeat_count:15,phrase_count:6,phrase_used:true,section_labels_used:true,warnings:['歌い始めは Verse 先頭の仮候補です。歌声の自動検出ではありません。']}}] : url.pathname.includes('/two/') ? [{id:'meta',content_id:'meta',path:'C:/Music/Second song.wav',format:'WAV',status:'COMPLETED',duration_ms:180000,analysis:{source:'REKORDBOX',available:true,bpm:129.25,key:'Am',beat_count:384,downbeat_count:96,phrase_count:12,phrase_used:true,existing_cues:[{time_ms:10000,kind:0,comment:'Existing'}],warnings:[]}}] : [] };
+  else if (url.pathname.endsWith('/tracks') && !url.pathname.includes('rekordbox')) result = { tracks: purposeMode && url.pathname.includes('/one/') ? [{id:'purpose-track',content_id:'RB1',path:'C:/Music/Library.wav',format:'WAV',status:'COMPLETED',duration_ms:30000,analysis:{source:'REKORDBOX',available:true,bpm:120,beat_count:60,downbeat_count:15,phrase_count:6,phrase_used:true,section_labels_used:true,warnings:['歌い始めは Verse 先頭の仮候補です。歌声の自動検出ではありません。']}}] : url.pathname.includes('/two/') ? [{id:'meta',content_id:'meta',path:'C:/Music/Second song.wav',format:'WAV',status:'COMPLETED',duration_ms:180000,analysis:{source:'REKORDBOX',available:true,bpm:129.25,key:'Am',beat_count:384,downbeat_count:96,phrase_count:12,phrase_used:true,existing_cues:[{time_ms:10000,kind:0,comment:'Existing'}],warnings:[]}}] : [{id:'track',content_id:'first-track',path:'C:/Music/First song.wav',format:'WAV',status:'PENDING',duration_ms:90000,analysis:null}] };
   else if (url.pathname.endsWith('/preview-position')) { previewCalls++;const unit=data.snap_to==='BAR'?2000:500;const ms=Math.round(data.time_ms/unit)*unit+data.step*unit;result={time_ms:ms,beat:Math.round(ms/500)}; }
   else if (url.pathname.endsWith('/candidates/manual')) {
     manualAdds++;candidates=candidates.map(c=>({...c,id:c.id+'-fork'}));
@@ -196,6 +206,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const evaluate = async expression => { const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true}); if(r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result.value; };
     const until = async expression => { for(let i=0;i<60;i++) { if(await evaluate(`Boolean(${expression})`)) return; await sleep(100); } const state=await evaluate("Array.from(document.querySelectorAll('audio')).map(a=>({src:a.src,time:a.currentTime,paused:a.paused,ready:a.readyState,error:a.error?.message}))");const panels=await evaluate("Array.from(document.querySelectorAll('.analysis-source-info')).map(e=>e.textContent)");throw Error(`Timed out: ${expression}\nAudio: ${JSON.stringify(state)}\nPanels: ${JSON.stringify(panels)}\nRuntime: ${JSON.stringify(errors)}`); };
     const click = label => evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(label)}).click()`);
+    const startAnalysis = async () => { await until("!document.querySelector('.start-analysis').disabled"); await evaluate("document.querySelector('.start-analysis').click()"); };
     const tap = async selector => {
       const rect=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.scrollIntoView({block:'center',inline:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
       await call('Input.dispatchMouseEvent',{type:'mousePressed',...rect,button:'left',clickCount:1});
@@ -210,6 +221,101 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       } else await evaluate(`(()=>{const e=document.querySelector('input[aria-label="${label}"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,${JSON.stringify(value)});e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     };
     const openColors = async () => { await evaluate("Array.from(document.querySelectorAll('.panel')).find(p=>p.querySelector('h2')?.textContent.includes('キュー色設定')).querySelector('button').click()");await until("document.querySelector('button[aria-label=\"Memory Cue の色\"]')"); };
+    const verifyIncrementalScope = async () => {
+      jobs.splice(0,jobs.length,{id:'one',status:'COMPLETED',total:1,completed:1,failed:0,track_path:'C:/Music/Previous.wav',created_at:new Date().toISOString(),updated_at:new Date().toISOString()});
+      batchMode=false; purposeMode=false; memoryOverflowFixture=false; incrementalFixture=true; aiAvailable=false;
+      preflightCachedIds=new Set(['playlist-0','playlist-2','playlist-3','playlist-4']);
+      await evaluate("localStorage.setItem('aicue.exportMode','COPY');localStorage.removeItem('aicue.cuePresets')");
+      await call('Page.reload');
+      await until("document.querySelectorAll('.job').length===1");
+      await click('複数曲を一括');
+      await click('目的から選ぶ');
+      await click('選択を解除');
+      await evaluate("document.querySelector('.cue-target-options input[value=INTRO_START]').click()");
+      await click('プレイリストから');
+      await until("document.querySelectorAll('#rekordbox-playlist option').length===4");
+      await evaluate("(()=>{const e=document.querySelector('#rekordbox-playlist');e.value='set';e.dispatchEvent(new Event('change',{bubbles:true}));})()");
+      await until("document.querySelectorAll('[aria-label=\"プレイリストの楽曲\"] button').length===50");
+      for(const i of [0,2,3,4,5,6,7]) await evaluate(`document.querySelectorAll('[aria-label="プレイリストの楽曲"] button')[${i}].click()`);
+      await until("document.querySelector('.analysis-preview')?.textContent.includes('選択7曲／保存済み4曲／新規解析3曲') && !document.querySelector('.start-analysis').disabled");
+      assert.equal(await evaluate("document.querySelector('.start-analysis').textContent"),'新規3曲を解析 →');
+      preflightFailure=true;
+      await click('内訳を再確認');
+      await until("document.querySelector('.analysis-preview')?.textContent.includes('Test preview failure')");
+      assert.equal(await evaluate("document.querySelector('.start-analysis').disabled"),true);
+      preflightFailure=false; preflightUnavailable='playlist-7';
+      await click('内訳を再確認');
+      await until("document.querySelector('.analysis-preview')?.textContent.includes('Test audio missing')");
+      assert.equal(await evaluate("document.querySelector('.start-analysis').disabled"),true);
+      preflightUnavailable=null; preflightDelay=1200;
+      const before=apiRequests.get('/api/v1/jobs/preview');
+      await click('内訳を再確認');
+      for(let i=0;i<40&&apiRequests.get('/api/v1/jobs/preview')===before;i++) await sleep(50);
+      preflightDelay=0; preflightCachedIds=new Set(['playlist-0','playlist-2','playlist-3','playlist-4','playlist-5','playlist-6','playlist-7']);
+      await click('内訳を再確認');
+      await until("document.querySelector('.start-analysis').textContent==='保存済み7曲の結果を表示 →' && !document.querySelector('.start-analysis').disabled");
+      await sleep(1400);
+      assert.equal(await evaluate("document.querySelector('.analysis-preview').textContent.includes('新規解析0曲')"),true,'late preview cannot replace the latest counts');
+      preflightCachedIds=new Set(['playlist-0','playlist-2','playlist-3','playlist-4']);
+      await click('内訳を再確認');
+      await until("document.querySelector('.start-analysis').textContent==='新規3曲を解析 →' && !document.querySelector('.start-analysis').disabled");
+      for(const width of [1440,390]) {
+        await call('Emulation.setDeviceMetricsOverride',{width,height:1050,deviceScaleFactor:1,mobile:width===390});
+        assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
+        await evaluate("document.querySelector('.analysis-preview').scrollIntoView({block:'center'})");
+        const shot=await call('Page.captureScreenshot',{format:'png'});
+        fs.writeFileSync(path.join(out,`incremental-preview-${width}.png`),Buffer.from(shot.data,'base64'));
+      }
+      await startAnalysis();
+      await until("document.querySelector('.result-title')?.textContent==='7曲の解析結果' && document.querySelectorAll('.candidate-table tbody tr').length===3");
+      assert.equal(await evaluate("document.querySelector('.result-scope button[aria-pressed=true]').textContent"),'今回追加した3曲');
+      assert.equal(await evaluate("document.querySelectorAll('.result-track').length"),3);
+      assert.equal(await evaluate("document.querySelector('.export-scope').textContent"),'書き出し対象：今回追加した3曲');
+      await click('表示中の候補を選ぶ');
+      await evaluate("document.querySelector('.batch-cue-actions .inline-check input').click()");
+      await click('選択した3候補を一括採用');
+      await until("document.querySelectorAll('.decision-accepted').length===3");
+      await until("!document.querySelector('.result-scope button').disabled");
+      await click('書き出すキューを確認');
+      await until("document.querySelector('[aria-label=\"書き込み内容\"]')");
+      assert.deepEqual(lastPlan.track_ids,['batch-4','batch-5','batch-6']);
+      await click('📁 rekordbox XML を書き出し');
+      await until("document.querySelector('#analysis-result').textContent.includes('楽曲 3 ・キュー 3')");
+      assert.deepEqual(lastExport.track_ids,['batch-4','batch-5','batch-6']);
+      assert.equal(candidates.filter(c=>c.accepted).length,7,'saved decisions remain intact outside the current group');
+      await until("!document.querySelector('.result-scope button').disabled");
+      await click('全7曲');
+      await until("document.querySelectorAll('.candidate-table tbody tr').length===7");
+      assert.equal(await evaluate("!!document.querySelector('[aria-label=\"書き込み内容\"]')"),false,'changing scope clears the previous plan');
+      assert.equal(await evaluate("document.querySelector('.export-scope').textContent"),'書き出し対象：全7曲');
+      await evaluate("document.querySelector('.result-track').click()");
+      await until("document.querySelectorAll('.candidate-table tbody tr').length===1");
+      await click('📁 rekordbox XML を書き出し');
+      await until("document.querySelector('#analysis-result').textContent.includes('楽曲 7 ・キュー 7')");
+      assert.equal(lastExport.track_ids.length,7,'per-track display filter retains the chosen export group');
+      await until("!document.querySelector('.result-scope button').disabled");
+      await click('今回追加した3曲');
+      await until("document.querySelectorAll('.candidate-table tbody tr').length===3");
+      assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
+      await evaluate("document.querySelector('.result-scope').scrollIntoView({block:'start'})");
+      const shot=await call('Page.captureScreenshot',{format:'png'});
+      fs.writeFileSync(path.join(out,'incremental-results-390.png'),Buffer.from(shot.data,'base64'));
+      preflightCachedIds=new Set(created.tracks.map(t=>t.content_id));
+      await click('内訳を再確認');
+      await until("document.querySelector('.start-analysis').textContent==='保存済み7曲の結果を表示 →' && !document.querySelector('.start-analysis').disabled");
+      await startAnalysis();
+      await until("document.querySelector('.result-scope')?.textContent.includes('今回は全曲が保存済み') && document.querySelectorAll('.candidate-table tbody tr').length===7");
+      assert.equal(await evaluate("document.querySelector('.result-scope button').disabled"),true);
+      assert.equal(await evaluate("document.querySelector('.result-scope button[aria-pressed=true]').textContent"),'全7曲');
+      preflightCachedIds=new Set(created.tracks.slice(0,6).map(t=>t.content_id));
+      await click('内訳を再確認');
+      await until("document.querySelector('.start-analysis').textContent==='新規1曲を解析 →' && !document.querySelector('.start-analysis').disabled");
+      await startAnalysis();
+      await until("document.querySelector('.result-scope button[aria-pressed=true]')?.textContent==='今回追加した1曲' && document.querySelectorAll('.candidate-table tbody tr').length===1");
+      assert.equal(await evaluate("document.querySelectorAll('.result-track').length"),1,'a single added track still displays its name');
+      assert.equal(await evaluate("document.querySelector('#result-timeline h2').textContent.includes('Playlist7.wav')"),true);
+      incrementalFixture=false; preflightCachedIds=null;
+    };
     const verifyCompletionRefresh = async () => {
       jobs.splice(0,jobs.length,{id:'one',status:'COMPLETED',total:1,completed:1,failed:0,track_path:'C:/Music/Refresh.wav',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),params:{analysis_quality:'STANDARD'}});
       batchMode=false; purposeMode=true; aiAvailable=false;
@@ -237,6 +343,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       assert.deepEqual(refreshPaths.map(p=>apiRequests.get(p)||0),[1,1,1,1],'completion stops polling and ignores repeated terminal events');
     };
     await call('Runtime.enable');
+    if(process.env.AICUE_UI_INCREMENTAL_ONLY==='1') {
+      await call('Page.navigate',{url:base+'/?token=ux-test'});
+      await until("document.querySelectorAll('.job').length>0");
+      await verifyIncrementalScope();
+      assert.deepEqual(errors,[]);
+      console.log('PASS: preview 7/4/3, retry and missing files, stale preview protection, scoped review/plan/export, all-seven export, zero-new results and mobile layout.');
+      return;
+    }
     if(process.env.AICUE_UI_REFRESH_ONLY==='1') {
       await verifyCompletionRefresh();
       assert.deepEqual(errors,[]);
@@ -268,7 +382,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("document.querySelector('#phrase-length').value==='1'");
     await evaluate("(()=>{const s=document.querySelector('.phrase-unit');s.value='beats';s.dispatchEvent(new Event('change',{bubbles:true}));})()");
     await until("document.querySelector('#phrase-length').value==='4'");
-    await click('解析を開始 →');
+    await startAnalysis();
     await until("document.querySelector('.result-title')?.textContent==='First song.wav'");
     assert.equal(created.tracks[0].path,'C:\\Music\\Quoted song.wav');
     assert.equal(created.params.bpm,null);
@@ -448,7 +562,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("!document.querySelector('.start-analysis').disabled");
     assert.equal(gridSaves,1,'only explicit save applies the edit');
     assert.equal(await evaluate("document.querySelector('.grid-editor').textContent.includes('C:/AppData/grid-backups/test')"),true);
-    await click('解析を開始 →');
+    await startAnalysis();
     for (let i=0;i<30 && created.params.analysis_source!=='REKORDBOX';i++) await sleep(50);
     assert.equal(created.params.analysis_source,'REKORDBOX');
     assert.equal(created.params.bpm,129.25);
@@ -522,7 +636,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("document.querySelector('.start-analysis').disabled");
     assert.equal(await evaluate("document.querySelector('.analysis-readiness').textContent.includes('1つ以上') && !document.querySelector('.analysis-readiness').classList.contains('ready')"),true);
     for(const type of ['CHORUS_START','CHORUS_END_MINUS_8_BARS','VOCAL_START']) await evaluate(`document.querySelector('.cue-target-options input[value="${type}"]').click()`);
-    await click('解析を開始 →');
+    await startAnalysis();
     await until("document.querySelectorAll('[aria-label=\"キュー候補一覧\"] tbody tr').length===3 && document.querySelector('.manual-cue-form')");
     assert.deepEqual(created.params.cue_targets,['CHORUS_START','CHORUS_END_MINUS_8_BARS','VOCAL_START']);
     assert.equal(await evaluate("document.querySelector('#analysis-result').textContent.includes('歌声の自動検出ではありません')"),true);
@@ -584,7 +698,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("document.querySelector('.batch-selection').textContent.includes('選択中 0 / 200曲')");
     for(const index of [0,2]) await evaluate(`document.querySelectorAll('[aria-label=\"プレイリストの楽曲\"] button')[${index}].click()`);
     await until("!document.querySelector('.start-analysis').disabled");
-    await click('2曲を一括解析 →');
+    await startAnalysis();
+    await until("document.querySelector('.result-title')?.textContent==='2曲の解析結果' && document.querySelectorAll('[aria-label=\"キュー候補一覧\"] tbody tr').length===3");
+    assert.equal(await evaluate("document.querySelector('.result-scope button').getAttribute('aria-pressed')"),"true");
+    await click("\u51682\u66f2");
     await until("document.querySelector('.result-title')?.textContent==='2曲の解析結果' && document.querySelectorAll('[aria-label=\"キュー候補一覧\"] tbody tr').length===6");
     assert.equal(await evaluate("document.body.textContent.includes('対象 2曲 · 新規解析 1曲 · 解析済み 1曲を再利用')"),true);
     assert.equal(await evaluate("document.querySelectorAll('.result-track')[0].textContent.includes('解析済みを再利用')"),true);
@@ -651,7 +768,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     fs.writeFileSync(path.join(out,'batch-review-390.png'),Buffer.from(reviewShot.data,'base64'));
     memoryOverflowFixture=true;
     await select('candidate-count','5');
-    await click('2曲を一括解析 →');
+    await startAnalysis();
+    await until("document.querySelectorAll('.candidate-table tbody tr').length===15");
+    await click('全2曲');
     await until("document.querySelectorAll('[aria-label=\"キュー候補一覧\"] tbody tr').length===30");
     assert.equal(created.params.top_k,5);
     await click('表示中の候補を選ぶ');
@@ -742,7 +861,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const shot=await call('Page.captureScreenshot',{format:'png'});
       fs.writeFileSync(path.join(out,`cue-presets-form-${width}.png`),Buffer.from(shot.data,'base64'));
     }
-    await click('解析を開始 →');
+    await startAnalysis();
     await until("document.querySelectorAll('[aria-label=\"キュー候補一覧\"] tbody tr').length===8");
     assert.equal(created.params.cue_default.cue_kind,'HOT');
     assert.equal(created.params.cue_default.hot_color,'#ff0000');
@@ -868,7 +987,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
     await click('ファイルパスから');
     await input('audio-path','C:\\Music\\Specialized.wav');
-    await click('解析を開始 →');
+    await startAnalysis();
     await until("document.querySelector('#analysis-result').textContent.includes('イントロアウトロ特化：')");
     assert.equal(created.params.cue_mode,'INTRO_OUTRO');
     assert.equal(created.params.analysis_quality,'STANDARD');
@@ -909,7 +1028,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await click('ファイルパスから');
     await input('audio-path','C:\\Music\\Vocal.wav');
     const writesBeforeVocal=decisionWrites;
-    await click('解析を開始 →');
+    await startAnalysis();
     await until("document.querySelector('.candidate-type-cell')?.textContent.includes('歌い始め')");
     assert.equal(created.params.analysis_quality,'AI');
     assert.equal(created.params.cue_mode,'INTRO_OUTRO');
@@ -932,7 +1051,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await click('ファイルパスから');
     await input('audio-path','C:\\Music\\Legacy-and-voice.wav');
     const beforeLegacyVoice=decisionWrites;
-    await click('解析を開始 →');
+    await startAnalysis();
     await until("document.querySelectorAll('.candidate-table tbody tr').length===6");
     assert.equal(created.params.cue_mode,'LEGACY');
     assert.equal(created.params.legacy_vocal_start,true);
@@ -971,7 +1090,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await input('audio-path','C:\\Music\\Vocal-end.wav');
       const beforeEnd=decisionWrites;
       const beforeEndRequest=created;
-      await click('解析を開始 →');
+      await startAnalysis();
       for(let attempt=0;attempt<100 && created===beforeEndRequest;attempt++) await sleep(50);
       assert.notEqual(created,beforeEndRequest);
       // This fixture reuses "one" for successive jobs; remount the result so
@@ -1018,7 +1137,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await click('ファイルパスから');
     await input('audio-path','C:\\Music\\Requires-restart.wav');
     const beforeUnsupported=created;
-    await click('解析を開始 →');
+    await startAnalysis();
     await until("document.querySelector('.new-job .error')?.textContent.includes('アプリの再起動が必要') || document.body.textContent.includes('ボーカルの段階解析を利用するにはアプリの再起動が必要')");
     assert.equal(created,beforeUnsupported,'old backend must not silently run full-song separation');
     vocalScanAvailable=true;
@@ -1061,6 +1180,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await until("document.querySelector('#analysis-quality')?.value==='STANDARD' && document.querySelector('#analysis-quality option[value=AI]')?.disabled");
     await click('イントロアウトロ特化');
     assert.equal(await evaluate("document.querySelector('#analysis-quality-help').textContent.includes('歌詞時刻がない場合は省略')"),true);
+    await verifyIncrementalScope();
     await verifyCompletionRefresh();
     assert.deepEqual(errors,[]);
     console.log('PASS: Memory Cue eight-color palette and unset, persisted unset and XML null, menu keyboard controls, MEMORY/HOT CUE dock and audition; playlist-wide selection across pagination, deduplication, unavailable-grid exclusion, two tracks x three purposes, correct track audition, scoped review and drafts, confirmed bulk BOTH adoption, save locks, full-job export, 1440/768/390px layouts; existing purpose/grid/color/audio regressions; no runtime exceptions.');

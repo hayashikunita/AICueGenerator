@@ -88,6 +88,9 @@ class Repository:
             "SELECT * FROM track_ref WHERE id = ?", (track_id,)
         ).fetchone()
 
+    def get_track_by_content_id(self, content_id: str) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM track_ref WHERE content_id=?", (content_id,)).fetchone()
+
     def list_tracks_missing_metadata(self) -> list[sqlite3.Row]:
         return self._conn.execute("SELECT * FROM track_ref WHERE metadata_json IS NULL").fetchall()
 
@@ -167,7 +170,7 @@ class Repository:
 
     # --- analysis_run ------------------------------------------------------
     def find_cached_run(
-        self, *, track_id: str, engine_version: str, fingerprint: str, params: dict[str, Any]
+        self, *, track_id: str, engine_version: str, fingerprint: str | None, params: dict[str, Any]
     ) -> sqlite3.Row | None:
         """Reuse the latest completed result, including manual additions."""
         analysis_params = {
@@ -178,10 +181,10 @@ class Repository:
             "SELECT r.*, (SELECT jt.analysis_json FROM job_track jt "
             "WHERE jt.run_id=r.id AND jt.status='COMPLETED' LIMIT 1) AS analysis_json "
             "FROM analysis_run r WHERE track_id=? AND engine_version=? AND "
-            "audio_fingerprint=? AND json_remove(params_json, '$.manual_revision', '$.result_revision', "
+            "(? IS NULL OR audio_fingerprint=?) AND json_remove(params_json, '$.manual_revision', '$.result_revision', "
             "'$.cue_default', '$.cue_settings')=? AND status='COMPLETED' "
             "ORDER BY finished_at DESC, r.rowid DESC LIMIT 1",
-            (track_id, engine_version, fingerprint, dumps(analysis_params)),
+            (track_id, engine_version, fingerprint, fingerprint, dumps(analysis_params)),
         ).fetchone()
 
     def create_run(
@@ -496,7 +499,15 @@ class Repository:
         self._conn.commit()
         return did
 
-    def list_accepted_decisions_for_job(self, job_id: str) -> list[sqlite3.Row]:
+    def validate_job_track_ids(self, job_id: str, track_ids: list[str]) -> None:
+        allowed = {row["track_id"] for row in self.list_job_tracks(job_id)}
+        if not track_ids or len(set(track_ids)) != len(track_ids) or not set(track_ids).issubset(allowed):
+            raise ValueError("書き出す曲の選択が変更されています。この解析に含まれる曲を選び直してください。")
+
+    def list_accepted_decisions_for_job(self, job_id: str, track_ids: list[str] | None = None) -> list[sqlite3.Row]:
+        if track_ids is not None:
+            self.validate_job_track_ids(job_id, track_ids)
+        scope = " AND r.track_id IN (" + ",".join("?" for _ in track_ids) + ")" if track_ids is not None else ""
         return self._conn.execute(
             "SELECT d.*, c.type AS cue_type, c.time_ms AS orig_time_ms, c.confidence, c.rank, r.track_id AS track_id "
             "FROM cue_decision d "
@@ -505,8 +516,8 @@ class Repository:
             "JOIN job_track jt ON jt.track_id = r.track_id "
             "JOIN analysis_job j ON jt.job_id = j.id "
             "WHERE jt.job_id = ? AND (jt.run_id = r.id OR "
-            "(jt.run_id IS NULL AND jt.analysis_json IS NULL AND r.params_json = j.params_json)) AND d.accepted = 1",
-            (job_id,),
+            "(jt.run_id IS NULL AND jt.analysis_json IS NULL AND r.params_json = j.params_json)) AND d.accepted = 1" + scope,
+            (job_id, *(track_ids or [])),
         ).fetchall()
 
     # --- write_plan / backup / audit --------------------------------------

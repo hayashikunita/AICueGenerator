@@ -79,6 +79,7 @@ export function App() {
       <div className="grid">
         <div>
           <NewJobForm
+            historyKey={jobs.filter((job) => TERMINAL.has(job.status)).map((job) => `${job.id}:${job.updated_at}`).join("|")}
             onCreated={(id) => {
               refreshJobs();
               setActiveId(id);

@@ -13,6 +13,7 @@ import type {
   ExecuteResult,
   ExportXmlResult,
   JobParams,
+  JobPreview,
   JobSummary,
   JobTrack,
   RekordboxSearchResult,
@@ -69,6 +70,11 @@ export const api = {
     req<{ job_id: string }>("/jobs", {
       method: "POST",
       body: JSON.stringify({ params, tracks }),
+    }),
+
+  previewJob: (params: JobParams, tracks: TrackInput[], signal?: AbortSignal) =>
+    req<JobPreview>("/jobs/preview", {
+      method: "POST", body: JSON.stringify({ params, tracks }), signal,
     }),
 
   listJobs: () => req<{ jobs: JobSummary[] }>("/jobs"),
@@ -129,7 +135,7 @@ export const api = {
   uploadCollectionXml: (filename: string, xmlText: string) => req<CollectionXml>("/write/source-xml", { method: "POST", body: JSON.stringify({ filename, xml_text: xmlText }) }),
   getCollectionXml: (sourceId: string) => req<CollectionXml>(`/write/source-xml/${encodeURIComponent(sourceId)}`),
 
-  buildPlan: (jobId: string, memoryCandidateIds?: string[], options?: { mode: ExportMode; source_id?: string; cue_colors?: { MEMORY: string | null; HOT: string } }) =>
+  buildPlan: (jobId: string, memoryCandidateIds?: string[], options?: { mode: ExportMode; source_id?: string; cue_colors?: { MEMORY: string | null; HOT: string }; track_ids?: string[] }) =>
     req<WritePlan>("/write/plan", {
       method: "POST",
       body: JSON.stringify({ job_id: jobId, memory_candidate_ids: memoryCandidateIds, ...options }),
@@ -141,14 +147,16 @@ export const api = {
       body: JSON.stringify({ plan_id: planId, confirmation_hash: confirmationHash }),
     }),
 
-  exportXml: (jobId: string, cueColors: { MEMORY: string | null; HOT: string }, memoryCandidateIds?: string[], options?: { mode: ExportMode; source_id?: string; confirmation_hash?: string }) =>
+  exportXml: (jobId: string, cueColors: { MEMORY: string | null; HOT: string }, memoryCandidateIds?: string[], options?: { mode: ExportMode; source_id?: string; confirmation_hash?: string; track_ids?: string[] }) =>
     req<ExportXmlResult>("/write/export-xml", {
       method: "POST",
       body: JSON.stringify({ job_id: jobId, cue_colors: cueColors, memory_candidate_ids: memoryCandidateIds, ...options }),
     }),
 
-  downloadReport: async (jobId: string) => {
-    const res = await fetch(`${BASE}/jobs/${jobId}/export.csv`, { headers: { Authorization: `Bearer ${token}` } });
+  downloadReport: async (jobId: string, trackIds?: string[]) => {
+    const query = new URLSearchParams();
+    trackIds?.forEach((id) => query.append("track_ids", id));
+    const res = await fetch(`${BASE}/jobs/${jobId}/export.csv?${query}`, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`CSV を取得できませんでした (${res.status})`);
     const url = URL.createObjectURL(await res.blob());
     const link = document.createElement("a");

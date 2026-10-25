@@ -65,7 +65,7 @@ def build_plan(req: BuildPlanRequest, repo: Repository = Depends(get_repo)) -> W
             raise HTTPException(status_code=400, detail="rekordboxから書き出した最新のコレクションXMLを選んでください。")
         try:
             prepared = prepare_existing(repo, req.job_id, source_id=req.source_id, source_dir=get_settings().data_dir / "import-sources",
-                memory_candidate_ids=req.memory_candidate_ids, cue_colors=req.cue_colors.model_dump() if req.cue_colors else None)
+                memory_candidate_ids=req.memory_candidate_ids, cue_colors=req.cue_colors.model_dump() if req.cue_colors else None, track_ids=req.track_ids)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         prepared["plan_id"] = repo.create_write_plan(job_id=req.job_id, confirmation_hash=prepared["confirmation_hash"])
@@ -73,7 +73,7 @@ def build_plan(req: BuildPlanRequest, repo: Repository = Depends(get_repo)) -> W
                        target=prepared["plan_id"], after={"add": prepared["add"], "preserved": prepared["preserved"], "conflict": prepared["conflict"]})
         return WritePlanResponse(**{key: value for key, value in prepared.items() if not key.startswith("_")})
     try:
-        rows = select_export_cues(repo.list_accepted_decisions_for_job(req.job_id), req.memory_candidate_ids)
+        rows = select_export_cues(repo.list_accepted_decisions_for_job(req.job_id, req.track_ids), req.memory_candidate_ids)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     decisions = []
@@ -182,10 +182,10 @@ def export_xml(req: ExportXmlRequest, repo: Repository = Depends(get_repo)) -> E
             if not req.source_id or not req.confirmation_hash:
                 raise ValueError("コレクションXMLを選び、追加内容を確認してから書き出してください。")
             prepared = prepare_existing(repo, req.job_id, source_id=req.source_id, source_dir=get_settings().data_dir / "import-sources",
-                memory_candidate_ids=req.memory_candidate_ids, cue_colors=colors)
+                memory_candidate_ids=req.memory_candidate_ids, cue_colors=colors, track_ids=req.track_ids)
             result = export_existing(prepared, get_settings().export_dir, confirmation_hash=req.confirmation_hash, cue_colors=colors)
         else:
-            result = export_rekordbox_xml(repo, req.job_id, export_root=get_settings().export_dir, cue_colors=colors, memory_candidate_ids=req.memory_candidate_ids)
+            result = export_rekordbox_xml(repo, req.job_id, export_root=get_settings().export_dir, cue_colors=colors, memory_candidate_ids=req.memory_candidate_ids, track_ids=req.track_ids)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result["tracks"] == 0:
@@ -196,7 +196,7 @@ def export_xml(req: ExportXmlRequest, repo: Repository = Depends(get_repo)) -> E
         result="ok",
         target=result["folder"],
         job_id=req.job_id,
-        after={"tracks": result["tracks"], "cues": result["cues"], "copied": result["copied"], "cue_colors": result["cue_colors"], "memory_candidate_ids": req.memory_candidate_ids, "mode": req.mode, "source_id": req.source_id},
+        after={"tracks": result["tracks"], "cues": result["cues"], "copied": result["copied"], "cue_colors": result["cue_colors"], "memory_candidate_ids": req.memory_candidate_ids, "track_ids": req.track_ids, "mode": req.mode, "source_id": req.source_id},
     )
     return ExportXmlResponse(**result)
 

@@ -1,7 +1,7 @@
-﻿import { useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { api } from "../api";
-import { useEffect, useRef } from "react";
-import type { AiStatus, AnalysisInfo, CueMode, CueTarget, RekordboxTrack } from "../types";
+import { useEffect, useMemo, useRef } from "react";
+import type { AiStatus, AnalysisInfo, CueMode, CueTarget, JobParams, JobPreview, RekordboxTrack, TrackInput } from "../types";
 import { CUE_TARGETS } from "../cueTargets";
 import { useToast } from "./Toast";
 import { PlaylistBrowser } from "./PlaylistBrowser";
@@ -15,7 +15,7 @@ import { IntroOutroSettingsPanel } from "./IntroOutroSettingsPanel";
 
 const cleanPath = (value: string) => value.trim().replace(/^"(.*)"$/, "$1");
 
-export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }) {
+export function NewJobForm({ onCreated, historyKey = "" }: { onCreated: (jobId: string) => void; historyKey?: string }) {
   const [source, setSource] = useState<"library" | "path">("library");
   const [libraryMode, setLibraryMode] = useState<"search" | "playlist">("search");
   const [path, setPath] = useState("");
@@ -164,6 +164,46 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
   const missingTargets = targetMode ? !cueTargets.length : specialized && !introOutro.targets.length;
   const invalidBars = specialized && BAR_FIELDS.some((field) => !Number.isInteger(introOutro[field]) || introOutro[field] < 1 || introOutro[field] > 128);
 
+  const filePath = cleanPath(path);
+  const invalidBpm = !batchMode && !!bpm.trim() && (!Number.isFinite(Number(bpm)) || Number(bpm) <= 0);
+  const jobParams = useMemo<JobParams>(() => ({
+    analysis_source: analysisSource,
+    analysis_quality: analysisQuality === "AI" && vocalRequested ? "AI" : "STANDARD",
+    ai_scope: "VOCAL",
+    cue_mode: cueMode,
+    ...(cueMode === "LEGACY" ? { legacy_vocal_start: legacyVocal, legacy_vocal_end: legacyVocalEnd, cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => target === "VOCAL_START" && legacyVocal || target === "VOCAL_END" && legacyVocalEnd)) } : {}),
+    ...(specialized ? { intro_outro: introOutro, cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => introOutro.targets.includes(target as CueTarget))) } : {}),
+    bpm: batchMode ? null : analysisSource === "REKORDBOX" ? analysis?.bpm ?? null : bpm.trim() ? Number(bpm) : null,
+    ...(specialized ? { beats_per_phrase: 4 } : phraseUnit === "beats" ? { beats_per_phrase: Number(barsPerPhrase) * 4 } : { bars_per_phrase: Number(barsPerPhrase) }),
+    top_k: Number(topK),
+    ...(cuePreferences.common ? { cue_default: cuePreferences.common } : {}),
+    ...(targetMode ? { cue_targets: cueTargets, end_alignment_bars: cuePreferences.endBars,
+      cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => cueTargets.includes(target as CueTarget))) } : {}),
+  }), [analysisSource, analysisQuality, vocalRequested, cueMode, legacyVocal, legacyVocalEnd, cuePreferences, specialized, introOutro, batchMode, analysis?.bpm, bpm, phraseUnit, barsPerPhrase, topK, targetMode, cueTargets]);
+  const jobTracks = useMemo<TrackInput[]>(() => batchMode ? batchTracks.map((t) => ({ content_id: t.content_id, path: t.path!, format: t.path!.split(".").pop()?.toUpperCase() || "WAV" })) : [{ content_id: contentId.trim() || filePath, path: filePath, format: filePath.split(".").pop()?.toUpperCase() || "WAV" }], [batchMode, batchTracks, contentId, filePath]);
+  const [preview, setPreview] = useState<{ key: string; data: JobPreview } | null>(null);
+  const [previewError, setPreviewError] = useState("");
+  const [previewRefresh, setPreviewRefresh] = useState(0);
+  const previewKey = JSON.stringify([jobParams, jobTracks, historyKey, analysisRefresh, previewRefresh]);
+  const previewEnabled = !missingTargets && !invalidBars && !invalidBpm && (batchMode ? batchReady : !!filePath && (analysisSource === "AUDIO" || !checkingAnalysis && !!analysis?.available));
+  const currentPreview = preview?.key === previewKey ? preview.data : null;
+  const previewReady = previewEnabled && !!currentPreview && currentPreview.unavailable === 0;
+  const readyText = previewReady ? currentPreview.new === 0 ? "✓ 保存済みの結果を表示できます" : "✓ 新規の曲だけ解析できます" : "解析内訳を確認すると開始できます";
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    setPreview(null);
+    setPreviewError("");
+    if (!previewEnabled) return;
+    const timer = window.setTimeout(() => {
+      api.previewJob(jobParams, jobTracks, controller.signal)
+        .then((data) => { if (active) setPreview({ key: previewKey, data }); })
+        .catch((e) => { if (active) setPreviewError(String(e)); });
+    }, 350);
+    return () => { active = false; window.clearTimeout(timer); controller.abort(); };
+  }, [previewKey, previewEnabled, jobParams, jobTracks]);
+
   const changeSource = (next: "library" | "path") => {
     setAnalysisSource(next === "library" ? "REKORDBOX" : "AUDIO");
     setSource(next);
@@ -197,7 +237,6 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
       setError("rekordbox の解析済みグリッドを確認してから開始してください。");
       return;
     }
-    const filePath = cleanPath(path);
     if (!batchMode && !filePath) {
       setError("解析する曲を選ぶか、音源ファイルのパスを入力してください。");
       return;
@@ -206,27 +245,12 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
       setError("BPM は 0 より大きい数値を入力するか、空欄にしてください。");
       return;
     }
+    if (!previewReady) { setError("解析内訳を確認してから開始してください。"); return; }
     setBusy(true);
     setError("");
     try {
-      const { job_id } = await api.createJob(
-        {
-          analysis_source: analysisSource,
-          analysis_quality: analysisQuality === "AI" && vocalRequested ? "AI" : "STANDARD",
-          ai_scope: "VOCAL",
-          cue_mode: cueMode,
-          ...(cueMode === "LEGACY" ? { legacy_vocal_start: legacyVocal, legacy_vocal_end: legacyVocalEnd, cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => target === "VOCAL_START" && legacyVocal || target === "VOCAL_END" && legacyVocalEnd)) } : {}),
-          ...(specialized ? { intro_outro: introOutro, cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => introOutro.targets.includes(target as CueTarget))) } : {}),
-          bpm: batchMode ? null : analysisSource === "REKORDBOX" ? analysis?.bpm ?? null : bpm.trim() ? Number(bpm) : null,
-          ...(specialized ? { beats_per_phrase: 4 } : phraseUnit === "beats" ? { beats_per_phrase: Number(barsPerPhrase) * 4 } : { bars_per_phrase: Number(barsPerPhrase) }),
-          top_k: Number(topK),
-          ...(cuePreferences.common ? { cue_default: cuePreferences.common } : {}),
-          ...(targetMode ? { cue_targets: cueTargets, end_alignment_bars: cuePreferences.endBars,
-            cue_settings: Object.fromEntries(Object.entries(cuePreferences.targets).filter(([target]) => cueTargets.includes(target as CueTarget))) } : {}),
-        },
-        batchMode ? batchTracks.map((t) => ({ content_id: t.content_id, path: t.path!, format: t.path!.split(".").pop()?.toUpperCase() || "WAV" })) : [{ content_id: contentId.trim() || filePath, path: filePath, format: filePath.split(".").pop()?.toUpperCase() || "WAV" }],
-      );
-      toast.push("success", `${batchMode ? `${batchTracks.length}曲の一括` : ""}解析を開始しました。結果画面で進捗を確認できます。`);
+      const { job_id } = await api.createJob(jobParams, jobTracks);
+      toast.push("success", currentPreview.new === 0 ? "保存済みの結果を読み込んでいます。" : `新規${currentPreview.new}曲の解析を開始しました。保存済み${currentPreview.cached}曲は再利用します。`);
       onCreated(job_id);
     } catch (e) {
       setError(`解析を開始できませんでした: ${e}`);
@@ -380,8 +404,17 @@ export function NewJobForm({ onCreated }: { onCreated: (jobId: string) => void }
             <input id="content-id" value={contentId} placeholder="通常は変更不要" onChange={(e) => setContentId(e.target.value)} /></>}
           </details>
           {error && <p className="error" role="alert">{error}</p>}
-          <p className={`analysis-readiness${(batchMode ? batchReady : cleanPath(path) && (analysisSource === "AUDIO" || analysis?.available) && !checkingAnalysis) && !missingTargets && !invalidBars ? " ready" : ""}`} role="status">{gridBusy ? "小節頭のデータを処理しています…" : missingTargets ? "作りたいCueの位置を1つ以上選んでください" : invalidBars ? "小節数は1〜128の整数で入力してください" : batchMode ? !batchTracks.length ? "↑ 一括解析する曲を選んでください" : batchChecking ? "選択曲の解析情報を確認中…" : !batchReady ? "解析できない曲の理由を確認するか、選択から外してください" : `✓ ${batchTracks.length}曲をまとめて解析できます` : !cleanPath(path) ? "↑ まず解析する曲を選んでください" : checkingAnalysis ? "rekordbox の解析情報を確認中…" : analysisSource === "REKORDBOX" && !analysis?.available ? "rekordbox の解析情報を確認すると開始できます" : "✓ 解析を開始できます"}</p>
-          <button className="start-analysis" type="submit" disabled={busy || missingTargets || invalidBars || (batchMode ? !batchReady : !cleanPath(path) || (analysisSource === "REKORDBOX" && (checkingAnalysis || !analysis?.available)))}>{analysisBusy ? "解析を開始しています…" : gridBusy ? "小節頭を処理しています…" : batchMode ? `${batchTracks.length}曲を一括解析 →` : "解析を開始 →"}</button>
+          <p className={`analysis-readiness${previewReady ? " ready" : ""}`} role="status">{gridBusy ? "小節頭のデータを処理しています…" : missingTargets ? "作りたいCueの位置を1つ以上選んでください" : invalidBars ? "小節数は1〜128の整数で入力してください" : batchMode ? !batchTracks.length ? "↑ 一括解析する曲を選んでください" : batchChecking ? "選択曲の解析情報を確認中…" : !batchReady ? "解析できない曲の理由を確認するか、選択から外してください" : readyText : !cleanPath(path) ? "↑ まず解析する曲を選んでください" : checkingAnalysis ? "rekordbox の解析情報を確認中…" : analysisSource === "REKORDBOX" && !analysis?.available ? "rekordbox の解析情報を確認すると開始できます" : readyText}</p>
+          {previewEnabled && <div className="analysis-preview" aria-label="今回の解析内訳" aria-live="polite">
+            {currentPreview ? <>
+              <strong>選択{currentPreview.total}曲／保存済み{currentPreview.cached}曲／新規解析{currentPreview.new}曲</strong>
+              {currentPreview.unavailable > 0 && <p className="error">確認できない曲が{currentPreview.unavailable}曲あります。音源を確認するか、選択から外してください。</p>}
+              {currentPreview.tracks.filter((track) => track.state === "UNAVAILABLE").map((track) => <p className="error" key={track.content_id}>{batchTracks.find((item) => item.content_id === track.content_id)?.title ?? selected?.title ?? track.content_id}：{track.reason}</p>)}
+              {currentPreview.new === 0 && currentPreview.unavailable === 0 && <p className="field-help">全曲の解析結果が保存済みです。音源の再解析はせず、現在のCue設定で結果を表示します。</p>}
+            </> : <p className={previewError ? "error" : "field-help"}>{previewError ? `解析内訳を確認できませんでした：${previewError}` : "保存済みの解析結果を確認中…"}</p>}
+            <button type="button" className="secondary tiny" disabled={busy} onClick={() => setPreviewRefresh((value) => value + 1)}>内訳を再確認</button>
+          </div>}
+          <button className="start-analysis" type="submit" disabled={busy || !previewReady}>{analysisBusy ? "解析を開始しています…" : gridBusy ? "小節頭を処理しています…" : previewReady ? currentPreview.new > 0 ? `新規${currentPreview.new}曲を解析 →` : `保存済み${currentPreview.cached}曲の結果を表示 →` : previewError ? "内訳を再確認してください" : currentPreview?.unavailable ? "解析できない曲を確認してください" : previewEnabled ? "解析内訳を確認中…" : "解析を開始 →"}</button>
         </fieldset>
       </form>
     </section>

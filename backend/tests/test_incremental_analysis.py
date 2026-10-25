@@ -7,6 +7,8 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,8 +16,9 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from app.analysis import ai, fingerprint, pipeline
+from app.analysis import ai, fingerprint, pipeline, reuse
 from app.analysis.fingerprint import audio_fingerprint
+from app.analysis.reuse import preview_job
 from app.common import ENGINE_VERSION, loads, new_id
 from app.domain.events import EventType
 from app.jobs import worker
@@ -47,6 +50,79 @@ def run(library, tracks, params):
     summary = repo.get_job(job)
     assert summary["status"] == "COMPLETED"
     return job, {row["track_id"]: dict(row) for row in repo.list_job_tracks(job)}
+
+
+def preview_inputs(repo, tracks):
+    return [{"content_id": row["content_id"], "path": row["path"]} for row in (repo.get_track(t) for t in tracks)]
+
+
+def test_preview_four_saved_three_new_is_read_only_and_matches_worker(library, monkeypatch):
+    repo, _, tracks, _ = library
+    params = JobParams(bpm=120, cue_targets=["INTRO_START"]).model_dump()
+    run(library, tracks[:4], params)
+    before = repo._conn.total_changes
+    with monkeypatch.context() as patch:
+        patch.setattr(worker, "analyze_file", Mock(side_effect=AssertionError("Preview must not analyse")))
+        patch.setattr(ai, "analyze_stems", Mock(side_effect=AssertionError("Preview must not run AI")))
+        preview = preview_job(repo, preview_inputs(repo, tracks), params)
+    assert (preview["total"], preview["cached"], preview["new"], preview["unavailable"]) == (7, 4, 3, 0)
+    assert [row["state"] for row in preview["tracks"]] == ["CACHED"] * 4 + ["NEW"] * 3
+    assert repo._conn.total_changes == before
+    _, result = run(library, tracks, params)
+    assert sum(bool(loads(row["analysis_json"]).get("cached")) for row in result.values()) == preview["cached"]
+    assert preview_job(repo, preview_inputs(repo, tracks), params)["new"] == 0
+
+
+@pytest.mark.parametrize("change", ["audio", "lyrics", "params", "colors", "missing"])
+def test_preview_validates_reusable_inputs(library, change):
+    repo, _, tracks, _ = library
+    params = JobParams(bpm=120, cue_targets=["VOCAL_START"]).model_dump()
+    run(library, tracks[:1], params)
+    source = Path(repo.get_track(tracks[0])["path"])
+    if change == "audio":
+        with source.open("r+b") as stream:
+            stream.seek(100)
+            stream.write(b"\x00\x00")
+    elif change == "lyrics":
+        source.with_suffix(".lrc").write_text("[00:02.00]New lyrics\n", encoding="utf-8")
+    elif change == "params":
+        params = {**params, "top_k": 1}
+    elif change == "colors":
+        params = {**params, "cue_default": {"cue_kind": "HOT", "hot_color": "#0000ff", "memory_color": None}}
+    else:
+        source.unlink()
+    preview = preview_job(repo, preview_inputs(repo, tracks[:2]), params)
+    assert preview["tracks"][0]["state"] == ("CACHED" if change == "colors" else "UNAVAILABLE" if change == "missing" else "NEW")
+    assert preview["tracks"][1]["state"] == "NEW"
+
+
+def test_preview_new_tracks_and_new_settings_do_not_hash_audio(library, monkeypatch):
+    repo, _, tracks, _ = library
+    params = JobParams(bpm=120, cue_targets=["INTRO_START"]).model_dump()
+    run(library, tracks[:1], params)
+    monkeypatch.setattr(fingerprint.AudioInput, "read", Mock(side_effect=AssertionError("Unnecessary hash")))
+    result = preview_job(repo, preview_inputs(repo, tracks), {**params, "top_k": 1})
+    assert result["new"] == 7 and result["unavailable"] == 0
+
+
+def test_preview_rekordbox_snapshot_matches_worker_and_opens_library_once(library, monkeypatch):
+    repo, _, tracks, _ = library
+    snapshot = {"available": True, "source": "REKORDBOX", "bpm": 120,
+                "beat_times": [i * .5 for i in range(16)], "downbeat_indices": [0, 4, 8, 12],
+                "phrase_boundaries": [], "phrase_sections": []}
+    open_db = Mock(side_effect=lambda **kwargs: nullcontext(object()))
+    for module in (worker, reuse):
+        monkeypatch.setattr(module, "open_rekordbox", open_db)
+        monkeypatch.setattr(module, "load_track_analysis", lambda *args: deepcopy(snapshot))
+    params = JobParams(analysis_source="REKORDBOX", cue_targets=["INTRO_START"]).model_dump()
+    run(library, tracks[:4], params)
+    open_db.reset_mock()
+    preview = preview_job(repo, preview_inputs(repo, tracks), params)
+    assert (preview["cached"], preview["new"]) == (4, 3)
+    open_db.assert_called_once()
+    snapshot["beat_times"] = [beat + .01 for beat in snapshot["beat_times"]]
+    preview = preview_job(repo, preview_inputs(repo, tracks), params)
+    assert preview["new"] == 7 and preview["cached"] == 0
 
 
 def test_adding_three_to_four_only_analyses_new_tracks_and_preserves_results(library, monkeypatch):
@@ -160,6 +236,10 @@ def test_existing_ai_results_skip_both_ai_and_audio_analysis(library, monkeypatc
     separate, analyse = Mock(side_effect=AssertionError("AI must not run again")), Mock(side_effect=AssertionError("Audio must not run again"))
     monkeypatch.setattr(worker, "analyze_stems", separate)
     monkeypatch.setattr(worker, "analyze_file", analyse)
+    assert preview_job(repo, preview_inputs(repo, [track]), params)["cached"] == 1
+    with monkeypatch.context() as patch:
+        patch.setattr(reuse, "load_cached_stems", lambda *args, **kwargs: None)
+        assert preview_job(repo, preview_inputs(repo, [track]), params)["new"] == 1
     hash_audio.reset_mock()
     _, result = run(library, [track], params)
     separate.assert_not_called()

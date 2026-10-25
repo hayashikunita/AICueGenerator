@@ -71,7 +71,7 @@ def _total_time(row: Any, analysis: dict[str, Any]) -> int:
 
 
 def export_rekordbox_xml(repo: Any, job_id: str, *, export_root: Path, cue_colors: dict[str, str | None] | None = None,
-                       memory_candidate_ids: list[str] | None = None) -> dict[str, Any]:
+                       memory_candidate_ids: list[str] | None = None, track_ids: list[str] | None = None) -> dict[str, Any]:
     """採用キューから yyyymmdd ライブラリを作り、音源複製と rekordbox.xml を書き出す。"""
     from pyrekordbox.rbxml import RekordboxXml
 
@@ -82,7 +82,7 @@ def export_rekordbox_xml(repo: Any, job_id: str, *, export_root: Path, cue_color
     if colors and (set(colors) != {"MEMORY", "HOT"} or any(not (key == "MEMORY" and c is None) and (not isinstance(c, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", c)) for key, c in colors.items())):
         raise ValueError("Cue の色は Memory Cue と Hot Cue に #RRGGBB 形式で指定してください。")
 
-    decisions = [dict(r) for r in repo.list_accepted_decisions_for_job(job_id)]
+    decisions = [dict(r) for r in repo.list_accepted_decisions_for_job(job_id, track_ids)]
     if not decisions:
         raise ValueError("採用キューがありません（書き出し対象なし）")
 

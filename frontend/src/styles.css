@@ -832,6 +832,10 @@ fieldset { border: 0; min-width: 0; margin: 0; padding: 0; }
 .beat-presets button[aria-pressed="true"] { background: rgba(108,140,255,.18); color: var(--text); box-shadow: 0 0 0 1px var(--accent); }
 .analysis-readiness { margin: 16px 0 0; font-size: 12px; color: var(--muted); line-height: 1.7; }
 .analysis-readiness.ready { color: var(--high); }
+.analysis-preview, .result-scope { margin-top: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
+.analysis-preview strong, .export-scope { line-height: 1.7; }
+.analysis-preview .tiny { margin-top: 6px; }
+.result-scope .source-switch { margin-top: 0; flex-wrap: wrap; }
 .analysis-readiness + .start-analysis { margin-top: 9px; }
 .toast .toast-dismiss { align-self: center; flex-shrink: 0; padding: 3px 7px; background: transparent; color: var(--muted); box-shadow: none; font-size: 18px; }
 .grid-confirm { border: 1px solid var(--accent); padding: 12px; border-radius: 8px; margin-top: 12px; }

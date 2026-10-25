@@ -202,7 +202,7 @@ def validate_snapshot(track: ET.Element, snapshot: dict) -> None:
         raise ValueError("コレクションXMLに含まれていない既存Cueがあります。最新のXMLを書き出し直してください。")
 
 
-def prepare_existing(repo, job_id: str, *, source_id: str, source_dir: Path, memory_candidate_ids=None, cue_colors=None) -> dict:
+def prepare_existing(repo, job_id: str, *, source_id: str, source_dir: Path, memory_candidate_ids=None, cue_colors=None, track_ids=None) -> dict:
     info, payload = source_info(source_id, source_dir)
     source = parse_collection(payload)
     by_path: dict[str, list[ET.Element]] = {}
@@ -213,7 +213,7 @@ def prepare_existing(repo, job_id: str, *, source_id: str, source_dir: Path, mem
                 by_path.setdefault(location_key(track.get("Location")), []).append(track)
             except ValueError:
                 continue
-    decisions = select_export_cues(repo.list_accepted_decisions_for_job(job_id), memory_candidate_ids)
+    decisions = select_export_cues(repo.list_accepted_decisions_for_job(job_id, track_ids), memory_candidate_ids)
     if not decisions:
         raise ValueError("追加するCueを選んでください。")
     grouped = {}

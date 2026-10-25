@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from .candidate_presenter import candidate_out
@@ -10,6 +10,7 @@ from ..persistence.repositories import Repository, row_to_dict
 from ..reporting.export import candidates_to_csv, job_report
 from ..rekordbox.metadata import track_metadata
 from ..analysis.ai import ai_status
+from ..analysis.reuse import preview_job
 from ..schemas.jobs import (
     CandidateListResponse,
     CreateJobRequest,
@@ -19,6 +20,7 @@ from ..schemas.jobs import (
     JobParams,
     JobTrackListResponse,
     JobTrackOut,
+    PreviewJobResponse,
 )
 from .deps import get_manager, get_repo, require_token
 
@@ -47,6 +49,11 @@ def create_job(req: CreateJobRequest, manager: JobManager = Depends(get_manager)
 @router.get("/analysis/ai-status")
 def analysis_ai_status() -> dict:
     return ai_status()
+
+
+@router.post("/jobs/preview", response_model=PreviewJobResponse)
+def preview_analysis(req: CreateJobRequest, repo: Repository = Depends(get_repo)) -> PreviewJobResponse:
+    return PreviewJobResponse(**preview_job(repo, [track.model_dump() for track in req.tracks], req.params.model_dump()))
 
 
 @router.get("/jobs", response_model=JobListResponse)
@@ -115,8 +122,14 @@ def job_report_json(job_id: str, repo: Repository = Depends(get_repo)) -> dict:
 
 
 @router.get("/jobs/{job_id}/export.csv", response_class=PlainTextResponse)
-def job_export_csv(job_id: str, repo: Repository = Depends(get_repo)) -> str:
+def job_export_csv(job_id: str, track_ids: list[str] | None = Query(default=None, min_length=1, max_length=200), repo: Repository = Depends(get_repo)) -> str:
     if repo.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="job not found")
-    rows = [_report_candidate(r) for r in repo.list_candidates_for_job(job_id)]
+    if track_ids is not None:
+        try:
+            repo.validate_job_track_ids(job_id, track_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    selected = set(track_ids) if track_ids is not None else None
+    rows = [_report_candidate(r) for r in repo.list_candidates_for_job(job_id) if selected is None or r["track_id"] in selected]
     return candidates_to_csv(rows)

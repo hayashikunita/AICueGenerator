@@ -22,13 +22,17 @@ function ActionBadge({ action }: { action: string }) {
   return <span className={`badge ${map[action] ?? "review"}`}>{labels[action] ?? action}</span>;
 }
 
-export function WritePlanPanel({ jobId, acceptedCount, memoryCount, hotCount, cueCounts, trackNames, deciding, candidates, onAudition }: { jobId: string; acceptedCount: number; memoryCount: number; hotCount: number; cueCounts: { trackId: string; title: string; memory: number; hot: number }[]; trackNames: Record<string, string>; deciding: boolean; candidates: Candidate[]; onAudition?: (timeMs: number, trackId?: string | null) => void }) {
+export function WritePlanPanel({ jobId, acceptedCount, memoryCount, hotCount, cueCounts, trackNames, deciding, candidates, onAudition, trackIds, scopeLabel, onBusyChange }: { jobId: string; acceptedCount: number; memoryCount: number; hotCount: number; cueCounts: { trackId: string; title: string; memory: number; hot: number }[]; trackNames: Record<string, string>; deciding: boolean; candidates: Candidate[]; onAudition?: (timeMs: number, trackId?: string | null) => void; trackIds: string[]; scopeLabel: string; onBusyChange: (busy: boolean) => void }) {
   const [plan, setPlan] = useState<WritePlan | null>(null);
   const [xmlResult, setXmlResult] = useState<ExportXmlResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<ExportMode>(() => { try { return localStorage.getItem("aicue.exportMode") === "COPY" ? "COPY" : "EXISTING"; } catch { return "EXISTING"; } });
   const [source, setSource] = useState(savedCollectionXml);
   const [sourceBusy, setSourceBusy] = useState(false);
+  useEffect(() => {
+    onBusyChange(busy || sourceBusy);
+    return () => onBusyChange(false);
+  }, [busy, sourceBusy, onBusyChange]);
   const [existingReviewed, setExistingReviewed] = useState(false);
   const [memoryIds, setMemoryIds] = useState(() => highestConfidenceMemory(candidates));
   const [memoryReviewed, setMemoryReviewed] = useState(false);
@@ -49,7 +53,7 @@ export function WritePlanPanel({ jobId, acceptedCount, memoryCount, hotCount, cu
     setPlan(null);
     setBusy(true);
     try {
-      const p = await api.buildPlan(jobId, memoryIds, { mode, source_id: mode === "EXISTING" ? source?.source_id : undefined, cue_colors: colors });
+      const p = await api.buildPlan(jobId, memoryIds, { mode, source_id: mode === "EXISTING" ? source?.source_id : undefined, cue_colors: colors, track_ids: trackIds });
       setPlan(p);
       setExistingReviewed(false);
       toast.push("info", `プランを作成: 追加 ${p.add} · 置換 ${p.replace} · 競合 ${p.conflict}`);
@@ -63,7 +67,7 @@ export function WritePlanPanel({ jobId, acceptedCount, memoryCount, hotCount, cu
   const exportXml = async () => {
     setBusy(true);
     try {
-      const r = await api.exportXml(jobId, colors, memoryIds, { mode, source_id: mode === "EXISTING" ? source?.source_id : undefined, confirmation_hash: mode === "EXISTING" ? plan?.confirmation_hash : undefined });
+      const r = await api.exportXml(jobId, colors, memoryIds, { mode, source_id: mode === "EXISTING" ? source?.source_id : undefined, confirmation_hash: mode === "EXISTING" ? plan?.confirmation_hash : undefined, track_ids: trackIds });
       setXmlResult(r);
       toast.push(
         "success",
@@ -80,6 +84,7 @@ export function WritePlanPanel({ jobId, acceptedCount, memoryCount, hotCount, cu
   return (
     <div className="panel">
       <h2>3. 採用したキューを書き出す</h2>
+      <p className="export-scope"><strong>書き出し対象：{scopeLabel}</strong></p>
       <label htmlFor="xml-export-mode">Cueの反映先<select id="xml-export-mode" value={mode} disabled={busy || deciding || sourceBusy} onChange={(event) => {
         const next = event.target.value as ExportMode; setMode(next); setPlan(null); setXmlResult(null); setExistingReviewed(false);
         try { localStorage.setItem("aicue.exportMode", next); } catch { /* The current choice remains usable. */ }
@@ -94,7 +99,7 @@ export function WritePlanPanel({ jobId, acceptedCount, memoryCount, hotCount, cu
       })}</div>}
       <MemoryExportPicker candidates={candidates} selectedIds={memoryIds} trackNames={trackNames} onChange={changeMemorySelection} disabled={busy || deciding} onAudition={onAudition} />
       {autoLimited && <label className="inline-check memory-export-confirm"><input type="checkbox" checked={memoryReviewed} disabled={busy || deciding} onChange={(event) => setMemoryReviewed(event.target.checked)} />自動選択されたXML出力対象を確認しました（候補・採用状態はすべて保持）</label>}
-      {Object.keys(trackNames).length > 1 && <p className="field-help">この解析の全曲から、今回選択したCueを1つのXMLにまとめます。上の曲の表示・絞り込みに関わらず全曲が対象です。</p>}
+      {trackIds.length > 1 && <p className="field-help">「{scopeLabel}」から選んだCueを1つのXMLにまとめます。上の曲ごとの絞り込みは候補の表示だけを変更します。</p>}
       {candidates.some((candidate) => candidate.preset) ? <p className="field-help">解析前の共通設定・目的別設定の色を使います。候補一覧と書き出し確認の色見本で確認できます。</p> : <><div className="cue-kind-legend" aria-label="XMLに書き出すCueの色"><span><CueKindSwatch kind="MEMORY" />Memory Cue</span><span><CueKindSwatch kind="HOT" />Hot Cue</span></div><p className="field-help">「キュー色設定」の色を、次に書き出す採用Cueへ適用します。Memory Cueの色がrekordboxで反映されるかは未確認です。</p></>}
       <div className="row">
         <button className="secondary" disabled={busy || deciding || sourceBusy || !existingReady || acceptedCount === 0 || noOutput || overflow} onClick={build}>
