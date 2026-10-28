@@ -11,6 +11,35 @@ from .cue_targets import target_candidates
 from .features import BeatFeatures
 
 
+INTRO_ORDINAL_MULTIPLIERS = {"INTRO_BAR": 1, "INTRO_BAR_X2": 2, "INTRO_BAR_X3": 3}
+
+
+def intro_ordinal_candidates(grid: BeatGrid, intro_start: CueCandidate | None, config: dict,
+                             duration: float) -> list[CueCandidate]:
+    """Count saved bars from the intro start; only the audio end limits positions."""
+    if intro_start is None:
+        return []
+    bars = grid.downbeat_indices
+    start = int(np.searchsorted(bars, intro_start.beat_index))
+    result = []
+    for target in config.get("targets", []):
+        if target not in INTRO_ORDINAL_MULTIPLIERS:
+            continue
+        ordinal = config.get("intro_position_bars", 8) * INTRO_ORDINAL_MULTIPLIERS[target]
+        bar = start + ordinal - 1
+        if not 0 <= bar < len(bars):
+            continue
+        beat = bars[bar]
+        if not 0 <= beat < len(grid.beat_times) or grid.beat_times[beat] >= duration:
+            continue
+        confidence = intro_start.confidence
+        label = cue_target_label(target, {"intro_outro": config})
+        detail = f"{label}。イントロの最初の小節を1小節目として数えた{ordinal}小節目の保存済み小節頭。イントロの終わり以降も対象とし、音源の末尾より前の位置に限ります。"
+        result.append(CueCandidate(CueType(target), grid.beat_times[beat], beat, confidence, 1,
+                                   (Evidence("候補の位置と根拠", 100, confidence / 100, detail),), True))
+    return result
+
+
 def fade_end_beat(levels: np.ndarray) -> int | None:
     """Require a sustained decline before the audible end; a hard cut is not a fade."""
     audible = activity_bounds(levels)
@@ -52,6 +81,8 @@ def intro_outro_candidates(feat: BeatFeatures, grid: BeatGrid, base: list[CueCan
     anchors, _ = target_candidates(feat, grid, base, ["INTRO_START", "INTRO_END", "OUTRO", "OUTRO_END"],
                                                 tuple(s for s in sections if s.kind in {"INTRO", "OUTRO"}), top_k=1, end_alignment_bars=1)
     points = {candidate.cue_type.value: candidate for candidate in anchors}
+    ordinals = {candidate.cue_type.value: candidate for candidate in
+                intro_ordinal_candidates(grid, points.get("INTRO_START"), config, duration)}
     result: list[CueCandidate] = []
     warnings: list[str] = []
 
@@ -85,26 +116,26 @@ def intro_outro_candidates(feat: BeatFeatures, grid: BeatGrid, base: list[CueCan
             point = points.get(target)
             if point:
                 add(target, point.beat_index, point.confidence, point.evidence[0].detail)
-        elif target in {"INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3"}:
-            start, end = index("INTRO_START"), index("INTRO_END")
-            multiplier = {"INTRO_BAR": 1, "INTRO_BAR_X2": 2, "INTRO_BAR_X3": 3}[target]
-            ordinal = settings["intro_position_bars"] * multiplier
-            # The first bar is the intro start. Never include the next section's first bar.
-            bar = start + ordinal - 1 if start is not None else None
-            if bar is not None and end is not None and start <= bar < end:
-                confidence = min(points["INTRO_START"].confidence, points["INTRO_END"].confidence)
-                add(target, int(bars[bar]), confidence, f"イントロの最初の小節を1小節目として数えた{ordinal}小節目の保存済み小節頭。イントロの終わりは含めません。")
+        elif target in INTRO_ORDINAL_MULTIPLIERS:
+            if target in ordinals:
+                result.append(ordinals[target])
         elif target in {"INTRO_INTERVAL", "OUTRO_INTERVAL"}:
             intro = target == "INTRO_INTERVAL"
             start, end = index("INTRO_START" if intro else "OUTRO"), index("INTRO_END" if intro else "OUTRO_END")
+            if intro:
+                # The intro start is the origin, not a limit on the interval
+                # series. Include the intro end and later sections, but never
+                # create a downbeat at or beyond the audio's actual end.
+                end = int(np.searchsorted(times[bars], duration, side="left"))
             if start is not None and end is not None and start < end:
                 step = settings["intro_interval_bars" if intro else "outro_interval_bars"]
-                confidence = min(points["INTRO_START" if intro else "OUTRO"].confidence, points["INTRO_END" if intro else "OUTRO_END"].confidence)
+                confidence = points["INTRO_START"].confidence if intro else min(points["OUTRO"].confidence, points["OUTRO_END"].confidence)
                 for bar in range(start + step, end, step):
                     if len(result) >= 1000:
                         warnings.append("1曲の候補数が1000件に達したため間隔候補を省略しました。小節間隔を広げてください。")
                         break
-                    add(target, int(bars[bar]), confidence, f"区間の始まりから{step}小節ずつ数えた保存済みの小節頭。")
+                    detail = f"イントロの始まりから{step}小節ずつ数えた保存済みの小節頭。イントロの終わり以降も曲末まで継続します。" if intro else f"区間の始まりから{step}小節ずつ数えた保存済みの小節頭。"
+                    add(target, int(bars[bar]), confidence, detail)
         elif target in {"INTRO_END_BEFORE", "OUTRO_END_BEFORE", "FADE_END_BEFORE", "TRACK_END_BEFORE"}:
             if target == "INTRO_END_BEFORE":
                 end, lower, amount, confidence = index("INTRO_END"), index("INTRO_START"), settings["intro_before_bars"], points.get("INTRO_END").confidence if points.get("INTRO_END") else 0

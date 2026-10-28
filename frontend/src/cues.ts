@@ -28,7 +28,7 @@ const CUES: Record<string, CueBase> = {
   VOCAL_END: { label: "ボーカルの終わり（要確認）", color: "#3fb6c9", icon: "■" },
   INTRO_END: { label: "イントロの終わり", color: "#5b8cff", icon: "▶" },
   OUTRO_END: { label: "アウトロの終わり", color: "#9a7cff", icon: "■" },
-  INTRO_INTERVAL: { label: "イントロ内の小節間隔", color: "#5b8cff", icon: "▸" },
+  INTRO_INTERVAL: { label: "イントロ開始からの小節間隔", color: "#5b8cff", icon: "▸" },
   INTRO_END_BEFORE: { label: "イントロの終わりの手前", color: "#5b8cff", icon: "↤" },
   OUTRO_INTERVAL: { label: "アウトロ内の小節間隔", color: "#9a7cff", icon: "▸" },
   OUTRO_END_BEFORE: { label: "アウトロの終わりの手前", color: "#9a7cff", icon: "↤" },

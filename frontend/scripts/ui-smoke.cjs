@@ -352,6 +352,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       assert.deepEqual(refreshPaths.map(p=>apiRequests.get(p)||0),[1,1,1,1],'completion stops polling and ignores repeated terminal events');
     };
     await call('Runtime.enable');
+    if(process.env.AICUE_UI_INTRO_ORDINAL_ONLY==='1') {
+      await call('Page.navigate',{url:base+'/?token=ux-test'});
+      await until("document.querySelectorAll('.job').length===2");
+      await click('イントロアウトロ特化');
+      await until("document.querySelector('#intro-position-bars')");
+      await evaluate("(()=>{const e=document.querySelector('#intro-position-bars');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'8');e.dispatchEvent(new Event('input',{bubbles:true}));})()");
+      await until("document.querySelector('.intro-outro-settings').textContent.includes('イントロの終わりを過ぎても曲末より前なら候補を作ります')");
+      for(const [target,label] of [['INTRO_BAR','イントロの8小節目'],['INTRO_BAR_X2','イントロの16小節目'],['INTRO_BAR_X3','イントロの24小節目']]) {
+        assert.equal(await evaluate(`document.querySelector('.intro-outro-settings input[value=${target}]').closest('label').textContent.includes(${JSON.stringify(label)})`),true);
+      }
+      assert.equal(await evaluate("document.querySelector('.intro-outro-settings').textContent.includes('指定小節目や「○小節前」が区間に収まらない場合')"),false);
+      for(const width of [1440,390]) {
+        await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+        assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
+      }
+      assert.deepEqual(errors,[]);
+      console.log('PASS: intro ordinal 8/16/24 settings, explanation permits positions past intro end, desktop/mobile layout; no runtime exceptions.');
+      return;
+    }
     if(process.env.AICUE_UI_PARALLEL_ONLY==='1') {
       parallelProgress=true;
       jobs.splice(0,jobs.length,{id:'ai-progress',status:'RUNNING',total:2,completed:0,failed:0,track_path:'C:/Music/Long song.wav',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),params:{analysis_quality:'AI',ai_scope:'VOCAL'}});
@@ -1011,11 +1030,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await presetSelect('イントロの指定小節目×2のCue種類','BOTH');
     await presetMemory('イントロの指定小節目×2 Memory Cue の色','#9900ff');
     await setColor('イントロの指定小節目×2 Hot Cue の色','#ff0000');
-    await evaluate("(()=>{const e=document.querySelector('[aria-label=\"イントロ間の小節ごとの小節数\"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'2');e.dispatchEvent(new Event('input',{bubbles:true}));})()");
-    await until("document.querySelector('.intro-outro-settings').textContent.includes('イントロ間の2小節ごと')");
+    await evaluate("(()=>{const e=document.querySelector('[aria-label=\"イントロ開始からの小節間隔の小節数\"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'2');e.dispatchEvent(new Event('input',{bubbles:true}));})()");
+    await until("document.querySelector('.intro-outro-settings').textContent.includes('イントロ開始から2小節ごと（曲末まで）')");
+    assert.equal(await evaluate("document.querySelector('.intro-outro-settings').textContent.includes('イントロの終わりと同じ位置や、その後の区間にも作成します')"),true);
     await evaluate("document.querySelector('.intro-outro-settings input[value=INTRO_INTERVAL]').closest('.cue-target-option').querySelector('summary').click()");
-    await evaluate("(()=>{const e=document.querySelector('select[aria-label=\"イントロ間の小節ごとのCue種類\"]');e.value='HOT';e.dispatchEvent(new Event('change',{bubbles:true}));})()");
-    await setColor('イントロ間の小節ごと Hot Cue の色','#00ff00');
+    await evaluate("(()=>{const e=document.querySelector('select[aria-label=\"イントロ開始からの小節間隔のCue種類\"]');e.value='HOT';e.dispatchEvent(new Event('change',{bubbles:true}));})()");
+    await setColor('イントロ開始からの小節間隔 Hot Cue の色','#00ff00');
     await click('選択を解除');
     assert.equal(await evaluate("document.querySelector('.start-analysis').disabled"),true);
     await click('すべて選ぶ');
@@ -1024,13 +1044,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await call('Page.reload');
     await until("document.querySelectorAll('.job').length>0");
     await click('イントロアウトロ特化');
-    await until("document.querySelector('[aria-label=\"イントロ間の小節ごとの小節数\"]').value==='2'");
+    await until("document.querySelector('[aria-label=\"イントロ開始からの小節間隔の小節数\"]').value==='2'");
     assert.equal(await evaluate("document.querySelector('#intro-position-bars').value"),'3');
     await evaluate("document.querySelector('.intro-outro-settings input[value=INTRO_BAR_X2]').closest('.cue-target-option').querySelector('summary').click()");
     assert.equal(await evaluate("document.querySelector('select[aria-label=\"イントロの指定小節目×2のCue種類\"]').value"),'BOTH');
     assert.equal(await evaluate("document.querySelector('[aria-label=\"アウトロ間の小節ごとの小節数\"]').value"),'4');
     await evaluate("document.querySelector('.intro-outro-settings input[value=INTRO_INTERVAL]').closest('.cue-target-option').querySelector('summary').click()");
-    assert.equal(await evaluate("document.querySelector('input[aria-label=\"イントロ間の小節ごと Hot Cue の色\"]').value"),'#00ff00');
+    assert.equal(await evaluate("document.querySelector('input[aria-label=\"イントロ開始からの小節間隔 Hot Cue の色\"]').value"),'#00ff00');
     for(const width of [1440,390]) {
       await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
       await evaluate("document.querySelector('.cue-mode-switch').scrollIntoView()");
@@ -1055,7 +1075,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.equal(created.params.cue_settings.INTRO_INTERVAL.cue_kind,'HOT');
     assert.equal(created.params.cue_settings.INTRO_INTERVAL.hot_color,'#00ff00');
     assert.equal(candidates.some(c=>['CHORUS_START','VOCAL_START','DROP','BREAK','BUILD'].includes(c.type)),false);
-    await until("document.querySelector('.candidate-type-cell').closest('tbody').textContent.includes('イントロ間の2小節ごと')");
+    await until("document.querySelector('.candidate-type-cell').closest('tbody').textContent.includes('イントロ開始から2小節ごと（曲末まで）')");
     assert.equal(await evaluate("document.querySelector('.candidate-type-cell').closest('tbody').textContent.includes('イントロの9小節目')"),true);
     assert.equal(candidates.filter(c=>c.type==='INTRO_INTERVAL').length,5);
     await click('選択を解除');

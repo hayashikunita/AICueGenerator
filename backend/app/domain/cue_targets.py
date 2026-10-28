@@ -5,7 +5,7 @@ CUE_TARGET_LABELS = {
     "INTRO_END": "イントロの終わり", "OUTRO_END": "アウトロの終わり",
     "CHORUS_START": "サビの始まり", "CHORUS_END": "サビの終わり",
     "CHORUS_END_MINUS_8_BARS": "サビの終わりから8小節前", "VOCAL_START": "歌い始め",
-    "INTRO_INTERVAL": "イントロ内の小節間隔", "INTRO_END_BEFORE": "イントロの終わりの手前",
+    "INTRO_INTERVAL": "イントロ開始からの小節間隔", "INTRO_END_BEFORE": "イントロの終わりの手前",
     "OUTRO_INTERVAL": "アウトロ内の小節間隔", "OUTRO_END_BEFORE": "アウトロの終わりの手前",
     "FADE_END": "曲の音量が小さくなる終わり", "FADE_END_BEFORE": "曲の音量が小さくなる終わりの手前",
     "TRACK_END": "曲の終わり", "TRACK_END_BEFORE": "曲の終わりの手前",
@@ -28,7 +28,7 @@ def cue_target_label(target: str, params: dict | None = None) -> str:
         multiplier = {"INTRO_BAR": 1, "INTRO_BAR_X2": 2, "INTRO_BAR_X3": 3}[target]
         return f"イントロの{config.get('intro_position_bars', 8) * multiplier}小節目"
     formats = {
-        "INTRO_INTERVAL": ("intro_interval_bars", "イントロ内の{}小節ごと"),
+        "INTRO_INTERVAL": ("intro_interval_bars", "イントロ開始から{}小節ごと（曲末まで）"),
         "INTRO_END_BEFORE": ("intro_before_bars", "イントロの終わりから{}小節前"),
         "OUTRO_INTERVAL": ("outro_interval_bars", "アウトロ内の{}小節ごと"),
         "OUTRO_END_BEFORE": ("outro_before_bars", "アウトロの終わりから{}小節前"),

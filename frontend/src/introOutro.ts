@@ -8,7 +8,7 @@ export const INTRO_OUTRO_GROUPS: { label: string; targets: { value: CueTarget; l
     { value: "INTRO_BAR", label: "イントロの指定小節目", field: "intro_position_bars", template: "イントロの{n}小節目", multiplier: 1 },
     { value: "INTRO_BAR_X2", label: "イントロの指定小節目×2", field: "intro_position_bars", template: "イントロの{n}小節目", multiplier: 2 },
     { value: "INTRO_BAR_X3", label: "イントロの指定小節目×3", field: "intro_position_bars", template: "イントロの{n}小節目", multiplier: 3 },
-    { value: "INTRO_INTERVAL", label: "イントロ間の小節ごと", field: "intro_interval_bars", template: "イントロ間の{n}小節ごと" },
+    { value: "INTRO_INTERVAL", label: "イントロ開始からの小節間隔", field: "intro_interval_bars", template: "イントロ開始から{n}小節ごと（曲末まで）" },
     { value: "INTRO_END_BEFORE", label: "イントロの終わりの手前", field: "intro_before_bars", template: "イントロの終わりから{n}小節前" },
     { value: "INTRO_END", label: "イントロの終わり" },
   ] },

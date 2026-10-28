@@ -42,13 +42,13 @@ def run(source, **overrides):
     return intro_outro_candidates(feat, grid, [], sections, {**config, **overrides}, grid.beat_times[-1] + .5)
 
 
-def test_all_specialized_targets_count_actual_bars_in_variable_tempo_and_stay_inside_sections(source):
+def test_all_specialized_targets_count_actual_bars_with_intro_intervals_to_track_end(source):
     candidates, warnings = run(source)
     assert not warnings
     by_type = {target: [c for c in candidates if c.cue_type.value == target] for target in INTRO_OUTRO_DEFAULT_TARGETS}
     assert all(by_type.values())
     expected = {"INTRO_START": [2], "INTRO_BAR": [30], "INTRO_BAR_X2": [62], "INTRO_BAR_X3": [94],
-                "INTRO_INTERVAL": [34, 66, 98], "INTRO_END_BEFORE": [114], "INTRO_END": [130],
+                "INTRO_INTERVAL": list(range(34, 547, 32)), "INTRO_END_BEFORE": [114], "INTRO_END": [130],
                 "OUTRO": [386], "OUTRO_INTERVAL": [402, 418, 434, 450, 466, 482, 498], "OUTRO_END_BEFORE": [482],
                 "OUTRO_END": [514], "FADE_END_BEFORE": [510], "FADE_END": [518], "TRACK_END_BEFORE": [534], "TRACK_END": [546]}
     assert {key: [c.beat_index for c in value] for key, value in by_type.items()} == expected
@@ -56,6 +56,44 @@ def test_all_specialized_targets_count_actual_bars_in_variable_tempo_and_stay_in
     assert all(c.beat_index in grid.downbeat_indices and c.time_sec == grid.beat_times[c.beat_index] for c in candidates)
     assert by_type["TRACK_END"][0].time_sec - by_type["TRACK_END_BEFORE"][0].time_sec != pytest.approx(6)
     assert "8小節ごと" in by_type["INTRO_INTERVAL"][0].evidence[0].detail
+
+
+@pytest.mark.parametrize("intro_bars", [6, 8])
+def test_intro_intervals_include_first_eight_bars_after_or_at_intro_end(source, intro_bars):
+    feat, grid, _, config = source
+    sections = (PhraseSection(2, 2 + intro_bars * 4, "INTRO"),)
+    candidates, warnings = intro_outro_candidates(feat, grid, [], sections,
+        {**config, "targets": ["INTRO_INTERVAL"]}, grid.beat_times[-1] + .5)
+    assert not warnings
+    assert [c.beat_index for c in candidates] == list(range(34, 547, 32))
+    assert candidates[0].beat_index >= sections[0].end_beat
+    assert all("曲末まで" in c.evidence[0].detail for c in candidates)
+
+
+@pytest.mark.parametrize("last_offset", [-.1, 0, .1])
+def test_intro_intervals_use_actual_track_end_and_saved_variable_tempo_bars(source, last_offset):
+    feat, grid, _, config = source
+    sections = (PhraseSection(274, 298, "INTRO"),)
+    duration = grid.beat_times[402] + last_offset
+    candidates, warnings = intro_outro_candidates(feat, grid, [], sections,
+        {**config, "targets": ["INTRO_INTERVAL"], "intro_interval_bars": 8}, duration)
+    assert not warnings
+    expected = [306, 338, 370] + ([402] if last_offset > 0 else [])
+    assert [c.beat_index for c in candidates] == expected
+    assert all(c.time_sec == grid.beat_times[c.beat_index] and c.time_sec < duration for c in candidates)
+    assert candidates[0].time_sec - grid.beat_times[274] != pytest.approx(16)
+
+
+def test_intro_intervals_need_start_but_not_a_detected_intro_end(source, monkeypatch):
+    from app.analysis import intro_outro
+    anchors, _ = run(source, targets=["INTRO_START"])
+    assert len(anchors) == 1
+    monkeypatch.setattr(intro_outro, "target_candidates", lambda *args, **kwargs: (anchors, []))
+    candidates, warnings = run(source, targets=["INTRO_INTERVAL"])
+    assert not warnings and candidates[0].beat_index == 34
+    monkeypatch.setattr(intro_outro, "target_candidates", lambda *args, **kwargs: ([], []))
+    missing, warnings = run(source, targets=["INTRO_INTERVAL"])
+    assert not missing and warnings
 
 
 def test_only_checked_targets_are_generated_and_periodic_targets_are_not_limited_to_top_k(source):
@@ -66,14 +104,14 @@ def test_only_checked_targets_are_generated_and_periodic_targets_are_not_limited
 
 
 @pytest.mark.parametrize("base,expected,omitted", [
-    (1, [2, 6, 10], 0), (8, [30, 62, 94], 0), (16, [62, 126], 1),
-    (32, [126], 2), (33, [], 3), (128, [], 3),
+    (1, [2, 6, 10], 0), (8, [30, 62, 94], 0), (16, [62, 126, 190], 0),
+    (32, [126, 254, 382], 0), (33, [130, 262, 394], 0), (128, [510], 2),
 ])
-def test_intro_ordinal_positions_count_first_bar_as_one_and_exclude_next_section(source, base, expected, omitted):
+def test_intro_ordinal_positions_count_first_bar_as_one_and_continue_past_intro_end(source, base, expected, omitted):
     candidates, warnings = run(source, targets=["INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3"], intro_position_bars=base)
     assert [c.beat_index for c in candidates] == expected
     assert len(warnings) == omitted
-    assert all(2 <= c.beat_index < 130 for c in candidates)
+    assert all(2 <= c.beat_index < len(source[1].beat_times) for c in candidates)
     assert all(c.time_sec == source[1].beat_times[c.beat_index] for c in candidates)
     for candidate in candidates:
         label = cue_target_label(candidate.cue_type.value, {"intro_outro": {"intro_position_bars": base}})
@@ -90,6 +128,44 @@ def test_intro_multiplier_can_be_selected_alone_and_uses_shared_base_not_interva
 
 def test_intro_ordinals_use_saved_variable_tempo_downbeats_with_leading_silence(source):
     feat, grid, _, config = source
+    sections = (PhraseSection(274, 282, "INTRO"),)
+    candidates, warnings = intro_outro_candidates(feat, grid, [], sections,
+        {**config, "targets": ["INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3"]}, grid.beat_times[-1] + .5)
+    assert not warnings
+    assert [candidate.beat_index for candidate in candidates] == [302, 334, 366]
+    assert all(candidate.time_sec == grid.beat_times[candidate.beat_index] for candidate in candidates)
+    assert candidates[0].time_sec - grid.beat_times[274] != pytest.approx(14)
+
+
+@pytest.mark.parametrize("intro_bars", [2, 6, 7, 8])
+def test_eighth_sixteenth_and_twenty_fourth_bar_survive_short_intro(source, intro_bars):
+    feat, grid, _, config = source
+    sections = (PhraseSection(2, 2 + intro_bars * 4, "INTRO"),)
+    candidates, warnings = intro_outro_candidates(feat, grid, [], sections,
+        {**config, "targets": ["INTRO_BAR", "INTRO_BAR_X2", "INTRO_BAR_X3"]}, grid.beat_times[-1] + .5)
+    assert not warnings
+    assert [candidate.beat_index for candidate in candidates] == [30, 62, 94]
+    assert all("イントロの終わり以降も対象" in candidate.evidence[0].detail for candidate in candidates)
+
+
+def test_intro_ordinals_need_start_but_not_intro_end(source, monkeypatch):
+    from app.analysis import intro_outro
+    anchors, _ = run(source, targets=["INTRO_START"])
+    monkeypatch.setattr(intro_outro, "target_candidates", lambda *args, **kwargs: (anchors, []))
+    candidates, warnings = run(source, targets=["INTRO_BAR", "INTRO_BAR_X2"])
+    assert not warnings and [candidate.beat_index for candidate in candidates] == [30, 62]
+    monkeypatch.setattr(intro_outro, "target_candidates", lambda *args, **kwargs: ([], []))
+    candidates, warnings = run(source, targets=["INTRO_BAR"])
+    assert not candidates and len(warnings) == 1
+
+
+@pytest.mark.parametrize("offset,expected", [(-.001, []), (0, []), (.001, [30])])
+def test_intro_ordinals_stop_at_actual_audio_end(source, offset, expected):
+    feat, grid, _, config = source
+    candidates, warnings = intro_outro_candidates(feat, grid, [], (PhraseSection(2, 10, "INTRO"),),
+        {**config, "targets": ["INTRO_BAR"]}, grid.beat_times[30] + offset)
+    assert [candidate.beat_index for candidate in candidates] == expected
+    assert len(warnings) == (0 if expected else 1)
     # Intro starts later, after the tempo change; it must not be counted from file start or BPM seconds.
     sections = (PhraseSection(274, 402, "INTRO"),)
     candidates, warnings = intro_outro_candidates(feat, grid, [], sections,
@@ -189,7 +265,8 @@ def test_specialized_api_skips_ai_and_keeps_source_unchanged_and_candidates_unad
             "tracks": [{"content_id": new_id(), "path": str(path)}]})
         assert response.status_code == 201, response.text
         job = response.json()["job_id"]
-        for _ in range(150):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
             status = client.get(f"/api/v1/jobs/{job}", headers=headers).json()
             if status["status"] in {"COMPLETED", "FAILED"}:
                 break
