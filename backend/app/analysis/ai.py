@@ -15,7 +15,48 @@ from .ai_progress import inference_progress
 
 AI_REVISION = "htdemucs-envelopes-1"
 VOCAL_REVISION = "htdemucs-vocal-scan-1"
-_INFERENCE_LOCK = threading.Lock()  # Never load two separators on this PC at once.
+
+def _has_parallel_memory() -> bool:
+    try:
+        import psutil
+    except ImportError:
+        return True
+    return psutil.virtual_memory().available >= 2 * 1024 ** 3
+
+
+class _InferenceGate:
+    """Bound model copies globally and serialize requests for the same cache file."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._active = 0
+        self._keys: set[str] = set()
+
+    def acquire(self, blocking=True, timeout=-1, *, key=None) -> bool:
+        def available():
+            return (self._active < get_settings().analysis_parallelism
+                    and (key is None or key not in self._keys)
+                    and (self._active == 0 or _has_parallel_memory()))
+
+        with self._condition:
+            if not self._condition.wait_for(available, timeout=0 if not blocking else None if timeout < 0 else timeout):
+                return False
+            self._active += 1
+            if key is not None:
+                self._keys.add(key)
+            return True
+
+    def release(self, *, key=None):
+        with self._condition:
+            if self._active <= 0 or (key is not None and key not in self._keys):
+                raise RuntimeError("Inference slot was not acquired")
+            self._active -= 1
+            if key is not None:
+                self._keys.remove(key)
+            self._condition.notify_all()
+
+
+_INFERENCE_LOCK = _InferenceGate()
 
 
 class AnalysisCancelled(Exception):
@@ -122,7 +163,7 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
         if progress_callback is not None:
             progress_callback(progress)
 
-    while not _INFERENCE_LOCK.acquire(timeout=.2):
+    while not _INFERENCE_LOCK.acquire(timeout=.2, key=key):
         if _cancelled(cancel_event):
             raise AnalysisCancelled()
         now = time.monotonic()
@@ -143,10 +184,11 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
         executable, models = ai_paths()
         worker = Path(__file__).with_name("stem_worker.py")
         log = cache / f"{key}.log"
-        environment = {**os.environ, "TORCH_HOME": str(models), "OMP_NUM_THREADS": "4"}
+        threads = get_settings().ai_threads
+        environment = {**os.environ, "TORCH_HOME": str(models), "OMP_NUM_THREADS": str(threads)}
         # shell=False keeps arbitrary audio filenames out of shell syntax.
         with log.open("w", encoding="utf-8") as stream:
-            process = subprocess.Popen([str(executable), "-u", str(worker), "--audio", path, "--output", str(output), "--model-dir", str(models)] + (["--vocal-only"] if vocal_only else []) + (["--vocal-end"] if vocal_only and require_end else []),
+            process = subprocess.Popen([str(executable), "-u", str(worker), "--audio", path, "--output", str(output), "--model-dir", str(models), "--threads", str(threads)] + (["--vocal-only"] if vocal_only else []) + (["--vocal-end"] if vocal_only and require_end else []),
                                        stdout=stream, stderr=stream, env=environment,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             started = time.monotonic()
@@ -184,4 +226,4 @@ def analyze_stems(path: str, *, cancel_event=None, progress_callback=None, vocal
             notify({"phase": "FINALIZING", "percent": 100, "elapsed_sec": round(time.monotonic() - started), "remaining_sec": 0})
         return data, False
     finally:
-        _INFERENCE_LOCK.release()
+        _INFERENCE_LOCK.release(key=key)

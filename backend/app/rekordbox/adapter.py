@@ -2,11 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 from ..domain.enums import ErrorCode
 from .errors import AdapterError
+
+
+def initialize_rekordbox() -> bool:
+    """Load circular driver imports before concurrent jobs and diagnostics start."""
+    try:
+        import_module("pyrekordbox")
+    except ImportError:
+        # The driver is optional for audio-only installations.
+        return False
+    return True
 
 
 @contextmanager

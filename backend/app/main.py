@@ -22,6 +22,7 @@ from .jobs.manager import JobManager
 from .persistence.db import init_db
 from .persistence.repositories import Repository
 from .rekordbox.metadata import backfill_track_metadata
+from .rekordbox.adapter import initialize_rekordbox
 from .security import resolve_token
 
 
@@ -29,6 +30,8 @@ from .security import resolve_token
 async def lifespan(app: FastAPI):
     settings = get_settings()
     init_db(settings.db_path)
+    if settings.analysis_parallelism > 1:
+        initialize_rekordbox()
     with Repository(settings.db_path) as repo:
         backfill_track_metadata(repo)
     # 起動ごとに新しいマネージャ（executor）を用意する。

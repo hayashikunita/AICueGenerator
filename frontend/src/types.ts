@@ -104,6 +104,7 @@ export interface RekordboxPlaylistTracksResult extends RekordboxSearchResult {
 export interface JobSummary {
   id: string;
   status: string;
+  can_resume?: boolean;
   total: number;
   completed: number;
   failed: number;

@@ -141,6 +141,7 @@ class RekordboxPlaylistTracksResponse(RekordboxSearchResponse):
 class JobSummary(BaseModel):
     id: str
     status: str
+    can_resume: bool = False
     total: int
     completed: int
     failed: int

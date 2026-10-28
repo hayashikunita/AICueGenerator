@@ -1,6 +1,6 @@
 """解析ワーカー（基本設計書 §8, §9）。
 
-1曲ずつデコード→解析→候補を永続化し、進捗を publish する。キャッシュ(analysis_run)が
+設定した並列数でデコード→解析→候補を永続化し、進捗を publish する。キャッシュ(analysis_run)が
 あれば再解析をスキップ。曲単位の失敗は継続（DECODE_FAILED 等）。
 """
 
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import hashlib
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -57,13 +58,16 @@ def run_job(
         hub.publish(job_id, EventType.JOB_CREATED, {"total": _job_total(repo, job_id)})
         tracks = repo.list_job_tracks(job_id)
 
-        for jt in tracks:
-            if cancel_event.is_set():
-                repo.set_job_status(job_id, "CANCELLED")
-                hub.publish(job_id, EventType.JOB_CANCELLED, {})
-                return
-            track_id = str(jt["track_id"])
-            _process_track(repo, hub, job_id, track_id, params, cancel_event=cancel_event)
+        # A restart retains published results, cue decisions and failure counts.
+        unfinished = [str(jt["track_id"]) for jt in tracks if jt["status"] not in {"COMPLETED", "FAILED"}]
+        parallelism = get_settings().analysis_parallelism
+        if parallelism > 1:
+            _process_parallel(db_path, hub, job_id, unfinished, params, cancel_event, parallelism)
+        else:
+            for track_id in unfinished:
+                if cancel_event.is_set():
+                    break
+                _process_track(repo, hub, job_id, track_id, params, cancel_event=cancel_event)
 
         if cancel_event.is_set():
             repo.set_job_status(job_id, "CANCELLED")
@@ -88,6 +92,34 @@ def run_job(
 def _job_total(repo: Repository, job_id: str) -> int:
     job = repo.get_job(job_id)
     return int(job["total"]) if job else 0
+
+
+def _process_parallel(db_path, hub, job_id, track_ids, params, cancel_event, parallelism):
+    def process(track_id):
+        # SQLite connections belong to one track worker, never shared threads.
+        with Repository(db_path) as track_repo:
+            if not cancel_event.is_set():
+                _process_track(track_repo, hub, job_id, track_id, params, cancel_event=cancel_event)
+
+    remaining = iter(track_ids)
+    with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="aicue-track") as executor:
+        pending = set()
+        try:
+            while True:
+                while len(pending) < parallelism and not cancel_event.is_set():
+                    track_id = next(remaining, None)
+                    if track_id is None:
+                        break
+                    pending.add(executor.submit(process, track_id))
+                if not pending:
+                    break
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    future.result()
+        except BaseException:
+            # Stop the other inference before publishing a failed job.
+            cancel_event.set()
+            raise
 
 
 def _process_track(

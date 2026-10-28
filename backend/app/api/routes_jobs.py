@@ -57,22 +57,33 @@ def preview_analysis(req: CreateJobRequest, repo: Repository = Depends(get_repo)
 
 
 @router.get("/jobs", response_model=JobListResponse)
-def list_jobs(repo: Repository = Depends(get_repo)) -> JobListResponse:
-    return JobListResponse(jobs=[_job_summary(r) for r in repo.list_jobs()])
+def list_jobs(repo: Repository = Depends(get_repo), manager: JobManager = Depends(get_manager)) -> JobListResponse:
+    return JobListResponse(jobs=[_job_summary(r, manager) for r in repo.list_jobs()])
 
 
 @router.get("/jobs/{job_id}", response_model=JobSummary)
-def get_job(job_id: str, repo: Repository = Depends(get_repo)) -> JobSummary:
+def get_job(job_id: str, repo: Repository = Depends(get_repo), manager: JobManager = Depends(get_manager)) -> JobSummary:
     row = repo.get_job(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return _job_summary(row)
+    return _job_summary(row, manager)
 
 
-def _job_summary(row) -> JobSummary:
+def _job_summary(row, manager: JobManager) -> JobSummary:
     metadata = loads(row["track_metadata_json"]) if row["track_metadata_json"] else {}
-    return JobSummary(**dict(row), track_title=metadata.get("title"), track_artist=metadata.get("artist"),
+    return JobSummary(**dict(row), can_resume=row["status"] in {"PENDING", "RUNNING"} and not manager.is_active(str(row["id"])),
+                      track_title=metadata.get("title"), track_artist=metadata.get("artist"),
                       params=JobParams(**(loads(row["params_json"]) or {})))
+
+
+@router.post("/jobs/{job_id}/resume", status_code=202)
+def resume_job(job_id: str, manager: JobManager = Depends(get_manager)) -> dict[str, bool]:
+    try:
+        return {"resumed": manager.resume(job_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/jobs/{job_id}/cancel", status_code=202)

@@ -9,14 +9,21 @@ function duration(seconds: number) {
 }
 
 export function AnalysisProgress({ job, tracks }: { job: JobSummary; tracks: JobTrack[] }) {
+  const running = tracks.filter((item) => item.status === "RUNNING");
+  if (!running.length) return <p className="field-help" role="status">解析の開始を待っています。完了した曲：{job.completed}/{job.total}</p>;
+  return <>
+    {running.length > 1 && <p role="status">{running.length}曲を同時に解析しています。</p>}
+    {running.map((track) => <TrackProgress key={track.id} job={job} track={track} index={tracks.findIndex((item) => item.id === track.id) + 1} />)}
+  </>;
+}
+
+function TrackProgress({ job, track, index }: { job: JobSummary; track: JobTrack; index: number }) {
   const [now, setNow] = useState(Date.now());
   const furthest = useRef({ key: "", seconds: 0 });
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  const track = tracks.find((item) => item.status === "RUNNING");
-  if (!track) return <p className="field-help" role="status">解析の開始を待っています。完了した曲：{job.completed}/{job.total}</p>;
   const data = track.analysis;
   const progress = data?.ai_progress;
   const vocalOnly = data?.ai_scope === "VOCAL" || progress?.scope === "VOCAL";
@@ -30,7 +37,6 @@ export function AnalysisProgress({ job, tracks }: { job: JobSummary; tracks: Job
   const ai = job.params?.analysis_quality === "AI" && data?.analysis_quality === "AI";
   const start = data?.ai_started_at ? Date.parse(data.ai_started_at) : NaN;
   const elapsed = Number.isFinite(start) ? Math.max(0, (now - start) / 1000) : progress?.elapsed_sec;
-  const index = tracks.findIndex((item) => item.id === track.id) + 1;
   return <div className="analysis-progress-info" aria-label="処理中の曲の進捗">
     <strong>{index}/{job.total}曲目：{trackName(track.path, track.title, track.artist)}</strong>
     <p role="status">{data?.stage || "音源の特徴を解析しています。"}</p>

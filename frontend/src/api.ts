@@ -84,6 +84,9 @@ export const api = {
   cancelJob: (id: string) =>
     req<{ cancelled: boolean }>(`/jobs/${id}/cancel`, { method: "POST" }),
 
+  resumeJob: (id: string) =>
+    req<{ resumed: boolean }>(`/jobs/${id}/resume`, { method: "POST" }),
+
   candidates: (jobId: string) =>
     req<{ candidates: Candidate[] }>(`/jobs/${jobId}/candidates`),
 

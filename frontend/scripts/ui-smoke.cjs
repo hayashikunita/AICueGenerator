@@ -16,6 +16,9 @@ let lastExport = null, lastPlan = null, memoryOverflowFixture = false;
 let metadataTrack = null;
 let existingConflict=false, existingRace=false, sourceUploads=0, existingExports=0;
 let aiAvailable=true;
+let resumeRequests=0;
+let parallelProgress=false;
+let parallelFirstDone=false;
 let vocalScanAvailable=true;
 let aiProgressPercent=34;
 let aiScanStart=0;
@@ -155,10 +158,16 @@ const server = http.createServer(async (req, res) => {
   else if (url.pathname.endsWith('/grid/apply')) { assert.equal(data.plan_id,'a'.repeat(32)); assert.equal(gridRunning,false); await sleep(250); gridSaves++; gridOffset++; result={ok:true,message:'小節頭を保存しました。rekordbox を起動して曲を読み込み直してください。',backup_dir:'C:/AppData/grid-backups/test'}; }
   else if (url.pathname.endsWith('/grid')) result = gridPreview(1);
   else if (batchMode && url.pathname.endsWith('/write/export-xml')) {lastExport=data;result={folder:'C:/AppData/exports/test-batch',xml_path:'C:/AppData/exports/test-batch/rekordbox.xml',tracks:data.track_ids?.length??batchTracks.length,cues:xmlEntries(data).length,copied:data.track_ids?.length??batchTracks.length,skipped:[],cue_colors:data.cue_colors,warnings:[]};}
-  else if (url.pathname === '/api/v1/jobs/ai-progress/tracks') result = {tracks:[{id:'ai-progress-track',content_id:'AI1',path:'C:/Music/Long song.wav',title:'Long song',format:'WAV',status:jobs.find(j=>j.id==='ai-progress').status==='RUNNING'?'RUNNING':'COMPLETED',duration_ms:440000,
+  else if (url.pathname === '/api/v1/jobs/ai-progress/tracks') {
+    result = {tracks:[{id:'ai-progress-track',content_id:'AI1',path:'C:/Music/Long song.wav',title:'Long song',format:'WAV',status:jobs.find(j=>j.id==='ai-progress').status==='RUNNING'&&!parallelFirstDone?'RUNNING':'COMPLETED',duration_ms:440000,
     analysis:{source:'REKORDBOX',available:false,analysis_quality:'AI',ai_scope:jobs.find(j=>j.id==='ai-progress').params.ai_scope??'FULL',ai_started_at:new Date(Date.now()-103000).toISOString(),stage:'AIで音源を分離しています。',
       ai_progress:{phase:'SEPARATING',percent:aiProgressPercent,elapsed_sec:103,remaining_sec:197,
         ...(jobs.find(j=>j.id==='ai-progress').params.ai_scope==='VOCAL'?{scope:'VOCAL',scan_start_sec:aiScanStart,scan_end_sec:aiScanStart+30,audio_duration_sec:440}:{})}}}]};
+    if(parallelProgress) result.tracks.push({...result.tracks[0],id:'parallel-second',content_id:'AI2',title:'Second parallel song',status:'RUNNING',analysis:{...result.tracks[0].analysis,ai_progress:{phase:'SEPARATING',percent:67,elapsed_sec:40,remaining_sec:20,scope:'VOCAL',scan_start_sec:60,scan_end_sec:90,audio_duration_sec:440}}});
+  }
+  else if (url.pathname === '/api/v1/jobs/one/resume' && req.method === 'POST') {
+    resumeRequests++; await sleep(300); jobs[0].can_resume=false; result={resumed:true};
+  }
   else if (url.pathname === '/api/v1/jobs/metadata/tracks') result = {tracks:[metadataTrack]};
   else if (batchMode && url.pathname.endsWith('/tracks') && !url.pathname.includes('rekordbox')) result = {tracks:batchTracks};
   else if (url.pathname.endsWith('/analysis') && url.pathname.includes('/rekordbox/tracks/')) {
@@ -343,6 +352,50 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       assert.deepEqual(refreshPaths.map(p=>apiRequests.get(p)||0),[1,1,1,1],'completion stops polling and ignores repeated terminal events');
     };
     await call('Runtime.enable');
+    if(process.env.AICUE_UI_PARALLEL_ONLY==='1') {
+      parallelProgress=true;
+      jobs.splice(0,jobs.length,{id:'ai-progress',status:'RUNNING',total:2,completed:0,failed:0,track_path:'C:/Music/Long song.wav',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),params:{analysis_quality:'AI',ai_scope:'VOCAL'}});
+      await call('Page.navigate',{url:base+'/?token=ux-test'});
+      await until("document.querySelectorAll('.job').length===1");
+      await evaluate("document.querySelector('.job').click()");
+      await until("document.querySelectorAll('.analysis-progress-info').length===2");
+      assert.equal(await evaluate("document.querySelector('.analysis-result').textContent.includes('2曲を同時に解析しています')"),true);
+      assert.equal(await evaluate("document.querySelectorAll('.analysis-progress-info')[0].textContent.includes('区間内の分離 34%')"),true);
+      assert.equal(await evaluate("document.querySelectorAll('.analysis-progress-info')[1].textContent.includes('区間内の分離 67%')"),true);
+      for(const width of [1440,390]) {
+        await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+        assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
+      }
+      parallelFirstDone=true; jobs[0].completed=1;
+      await until("document.querySelectorAll('.analysis-progress-info').length===1 && document.querySelector('.analysis-progress-info').textContent.includes('Second parallel song')");
+      assert.equal(await evaluate("document.querySelector('progress[aria-label=\"曲内の確認済み範囲\"]').value"),60);
+      assert.equal(await evaluate("document.querySelector('.analysis-progress-info').textContent.includes('2/2曲目')"),true);
+      assert.deepEqual(errors,[]);
+      console.log('PASS: two simultaneous track progress cards, independent progress, completion of first track retains second track progress, desktop/mobile layout; no runtime exceptions.');
+      return;
+    }
+    if(process.env.AICUE_UI_RESUME_ONLY==='1') {
+      Object.assign(jobs[0], {status:'RUNNING',total:96,completed:64,failed:1,can_resume:true});
+      await call('Page.navigate',{url:base+'/?token=ux-test'});
+      await until("document.querySelectorAll('.job').length===2");
+      await evaluate("document.querySelector('.job').click()");
+      await until("document.querySelector('.analysis-result').textContent.includes('完了した64曲の結果は保存されています')");
+      assert.equal(await evaluate("document.querySelector('.analysis-progress-info')===null"),true);
+      assert.equal(await evaluate("document.querySelector('.job .status').textContent"),'中断（再開できます）');
+      for(const width of [1440,390]) {
+        await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+        assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
+      }
+      await click('未完了の曲から再開');
+      await until("Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='再開中…'&&b.disabled)");
+      await until("document.querySelector('.analysis-result').textContent.includes('解析をキャンセル') && !document.querySelector('.analysis-result').textContent.includes('解析が中断しています')");
+      assert.equal(resumeRequests,1);
+      assert.equal(jobs[0].completed,64);
+      assert.equal(jobs[0].failed,1);
+      assert.deepEqual(errors,[]);
+      console.log('PASS: interrupted status, saved 64/96 results, resume action and disabled button, active cancellation, desktop/mobile layout; no runtime exceptions.');
+      return;
+    }
     if(process.env.AICUE_UI_INCREMENTAL_ONLY==='1') {
       await call('Page.navigate',{url:base+'/?token=ux-test'});
       await until("document.querySelectorAll('.job').length>0");

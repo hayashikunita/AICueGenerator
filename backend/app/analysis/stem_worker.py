@@ -20,6 +20,7 @@ def main() -> None:
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--vocal-only", action="store_true")
     parser.add_argument("--vocal-end", action="store_true")
+    parser.add_argument("--threads", type=int, choices=range(1, 9), default=4)
     args = parser.parse_args()
     os.environ["TORCH_HOME"] = args.model_dir
     import numpy as np
@@ -29,7 +30,7 @@ def main() -> None:
     from demucs_infer.pretrained import get_model
     from demucs_infer.apply import apply_model
 
-    torch.set_num_threads(min(4, os.cpu_count() or 1))
+    torch.set_num_threads(min(args.threads, os.cpu_count() or 1))
     random.seed(0)
     torch.manual_seed(0)
     model = get_model("htdemucs").cpu().eval()

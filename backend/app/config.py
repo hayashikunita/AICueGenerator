@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +31,8 @@ class Settings(BaseSettings):
     rekordbox_db_path: str | None = None
     rekordbox_key: str | None = None
     ai_python: str | None = None
+    analysis_parallelism: int = Field(default=1, ge=1, le=2)
+    ai_threads: int = Field(default=4, ge=1, le=8)
 
     # API トークン。未指定なら data_dir/token に保存した値を再利用する（起動間で不変）。
     token: str | None = None

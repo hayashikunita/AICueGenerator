@@ -217,7 +217,8 @@ def test_existing_ai_results_skip_both_ai_and_audio_analysis(library, monkeypatc
             return 0
 
     monkeypatch.setattr(ai, "ai_status", lambda: {"available": True})
-    monkeypatch.setattr(ai, "get_settings", lambda: SimpleNamespace(data_dir=library[1].parent, ai_python=None))
+    monkeypatch.setattr(ai, "get_settings", lambda: SimpleNamespace(data_dir=library[1].parent, ai_python=None,
+                                                                 analysis_parallelism=1, ai_threads=4))
     monkeypatch.setattr(ai.subprocess, "Popen", Process)
     hash_audio = Mock(wraps=fingerprint.audio_fingerprint)
     monkeypatch.setattr(fingerprint, "audio_fingerprint", hash_audio)

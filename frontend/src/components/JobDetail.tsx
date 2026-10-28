@@ -31,6 +31,7 @@ export function JobDetail({
   const [err, setErr] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [pendingDecisions, setPendingDecisions] = useState(0);
   const [playbackMs, setPlaybackMs] = useState(0);
@@ -133,6 +134,20 @@ export function JobDetail({
     }
   };
 
+  const resume = async () => {
+    setResuming(true);
+    try {
+      const result = await api.resumeJob(jobId);
+      toast.push("info", result.resumed ? "完了済みの結果を保持して、未完了の曲から解析を再開しました" : "解析はすでに実行中です");
+      refreshJob();
+      loadTracks();
+    } catch (e) {
+      toast.push("error", `再開できませんでした: ${e}`);
+    } finally {
+      setResuming(false);
+    }
+  };
+
   const pct = job && job.total > 0 ? Math.round(((job.completed + job.failed) / job.total) * 100) : 0;
   const running = job ? !TERMINAL.has(job.status) : false;
   const reusedTracks = tracks.filter((track) => track.status === "COMPLETED" && track.analysis?.cached).length;
@@ -208,8 +223,9 @@ export function JobDetail({
             {job?.params?.cue_mode === "INTRO_OUTRO" && job.params.intro_outro && <p className="field-help">イントロアウトロ特化：{job.params.intro_outro.targets.map((target) => introOutroLabel(target, job.params!.intro_outro!)).join("・")}</p>}
           </div>
           <div className="row">
-            {job && <span className={`status ${job.failed > 0 ? "FAILED" : job.status}`}>{jobStatus(job.status, job.failed)}</span>}
-            {job && !TERMINAL.has(job.status) && (
+            {job && <span className={`status ${job.failed > 0 ? "FAILED" : job.status}`}>{job.can_resume ? "中断（再開できます）" : jobStatus(job.status, job.failed)}</span>}
+            {job?.can_resume && <button className="secondary tiny" onClick={resume} disabled={resuming}>{resuming ? "再開中…" : "未完了の曲から再開"}</button>}
+            {job && !TERMINAL.has(job.status) && !job.can_resume && (
               <button className="secondary tiny" onClick={cancel} disabled={cancelling}>
                 {cancelling ? "停止中…" : "解析をキャンセル"}
               </button>
@@ -249,7 +265,9 @@ export function JobDetail({
           )}
         </div>
 
-        {running && job && <AnalysisProgress job={job} tracks={tracks} />}
+        {running && job && (job.can_resume
+          ? <p className="field-help" role="status">解析が中断しています。完了した{job.completed}曲の結果は保存されています。「未完了の曲から再開」で続きを解析できます。</p>
+          : <AnalysisProgress job={job} tracks={tracks} />)}
         {!running && tracks.length > 0 && <div className="result-scope" aria-label="確認・書き出しの対象">
           <div className="source-switch">
             <button type="button" className={scope === "NEW" ? "" : "secondary"} aria-pressed={scope === "NEW"} disabled={trackLocked || newTracks.length === 0} onClick={() => changeScope("NEW")}>今回追加した{newTracks.length}曲</button>
@@ -272,7 +290,7 @@ export function JobDetail({
         </div>}
         {activeTrack && <AnalysisSourcePanel track={activeTrack} />}
         {job && job.failed > 0 && <p className="error" role="alert">{job.failed} 曲を解析できませんでした。上の理由と、音源・rekordbox の解析状態を確認してください。</p>}
-        {running && <p className="field-help" role="status">音源を解析しています。完了するとキュー候補が自動で表示されます。</p>}
+        {running && !job?.can_resume && <p className="field-help" role="status">音源を解析しています。完了するとキュー候補が自動で表示されます。</p>}
 
         {err && <p className="error">{err}</p>}
 

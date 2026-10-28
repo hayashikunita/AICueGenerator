@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from ..common import loads
 from ..persistence.repositories import Repository
 from ..rekordbox.metadata import read_track_metadata
 from .progress import ProgressHub
@@ -53,11 +54,45 @@ class JobManager:
         finally:
             repo.close()
 
-        cancel = threading.Event()
         with self._lock:
-            self._cancel_events[job_id] = cancel
-        self._executor.submit(run_job, self._db_path, self._hub, job_id, params, cancel)
+            self._start(job_id, params)
         return job_id
+
+    def is_active(self, job_id: str) -> bool:
+        with self._lock:
+            return job_id in self._cancel_events
+
+    def resume(self, job_id: str) -> bool:
+        """Resume an interrupted job, keeping its completed results and decisions."""
+        with self._lock:
+            if job_id in self._cancel_events:
+                return False
+            with Repository(self._db_path) as repo:
+                job = repo.get_job(job_id)
+                if job is None:
+                    raise KeyError(job_id)
+                if job["status"] not in {"PENDING", "RUNNING"}:
+                    raise ValueError("この解析はすでに終了しています。")
+                params = loads(job["params_json"])
+            self._start(job_id, params)
+        return True
+
+    def _start(self, job_id: str, params: dict[str, Any]) -> None:
+        # Called under _lock so simultaneous resume requests cannot start twice.
+        cancel = threading.Event()
+        self._cancel_events[job_id] = cancel
+        try:
+            self._executor.submit(self._run, job_id, params, cancel)
+        except Exception:
+            self._cancel_events.pop(job_id, None)
+            raise
+
+    def _run(self, job_id: str, params: dict[str, Any], cancel: threading.Event) -> None:
+        try:
+            run_job(self._db_path, self._hub, job_id, params, cancel)
+        finally:
+            with self._lock:
+                self._cancel_events.pop(job_id, None)
 
     def cancel(self, job_id: str) -> bool:
         with self._lock:
